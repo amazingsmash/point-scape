@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Nube de puntos LAS</title>
+    <title>Pointscape</title>
     <link
       rel="stylesheet"
       href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"
@@ -15,75 +15,145 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="map-shell" aria-label="Mapa de Las Palmas de Gran Canaria">
+    <main class="map-shell" aria-label="Pointscape map">
       <section class="layer-panel" aria-labelledby="layers-title">
-        <h2 id="layers-title">Capas</h2>
-        <fieldset>
-          <legend>Mapa base</legend>
-          <label class="layer-option">
-            <input type="radio" name="base-layer" value="street" />
-            <span>Callejero</span>
-          </label>
-          <label class="layer-option">
-            <input type="radio" name="base-layer" value="satellite" checked />
-            <span>Foto ortogr&aacute;fica</span>
-          </label>
-        </fieldset>
-        <label class="layer-option layer-option-toggle">
-          <input type="checkbox" id="terrain-toggle" checked />
-          <span>Elevaciones</span>
-        </label>
-        <label class="camera-control" for="pitch-control">
-          <span>Inclinaci&oacute;n</span>
-          <output id="pitch-value" for="pitch-control">0&deg;</output>
-          <input
-            type="range"
-            id="pitch-control"
-            min="0"
-            max="85"
-            step="1"
-            value="0"
-          />
-        </label>
-        <label class="camera-control" for="terrain-exaggeration-control">
-          <span>Exageraci&oacute;n vertical</span>
-          <output id="terrain-exaggeration-value" for="terrain-exaggeration-control">1.0x</output>
-          <input
-            type="range"
-            id="terrain-exaggeration-control"
-            min="1"
-            max="5"
-            step="0.1"
-            value="1"
-          />
-        </label>
-        <label class="camera-control" for="point-offset-control">
-          <span>Offset nube</span>
-          <output id="point-offset-value" for="point-offset-control">2 m</output>
-          <input
-            type="range"
-            id="point-offset-control"
-            min="0"
-            max="10"
-            step="0.5"
-            value="2"
-          />
-        </label>
-        <label class="file-drop" id="las-drop" for="las-file">
-          <span>Cargar LAS</span>
-          <small>Arrastra un .las o haz clic</small>
-          <input type="file" id="las-file" accept=".las" />
-        </label>
-        <button class="fly-button" id="fly-to-point-cloud" type="button">
-          Fly To Point Cloud
+        <button
+          class="menu-toggle"
+          id="menu-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="menu-content"
+        >
+          <span class="menu-icon" aria-hidden="true"></span>
+          <span id="layers-title">Pointscape</span>
         </button>
-        <p class="file-status" id="las-status">Nube aleatoria inicial.</p>
+        <div class="menu-content" id="menu-content" hidden>
+          <details class="control-section" open>
+            <summary>Base map</summary>
+            <div class="control-section-body">
+              <label class="layer-option">
+                <input type="radio" name="base-layer" value="street" />
+                <span>Street map</span>
+              </label>
+              <label class="layer-option">
+                <input type="radio" name="base-layer" value="satellite" checked />
+                <span>Satellite imagery</span>
+              </label>
+            </div>
+          </details>
+
+          <details class="control-section">
+            <summary>Terrain and camera</summary>
+            <div class="control-section-body">
+              <label class="layer-option layer-option-toggle">
+                <input type="checkbox" id="terrain-toggle" checked />
+                <span>Terrain</span>
+              </label>
+              <label class="camera-control" for="pitch-control">
+                <span>Pitch</span>
+                <output id="pitch-value" for="pitch-control">0&deg;</output>
+                <input
+                  type="range"
+                  id="pitch-control"
+                  min="0"
+                  max="85"
+                  step="1"
+                  value="0"
+                />
+              </label>
+              <label class="camera-control" for="terrain-exaggeration-control">
+                <span>Vertical exaggeration</span>
+                <output id="terrain-exaggeration-value" for="terrain-exaggeration-control">1.0x</output>
+                <input
+                  type="range"
+                  id="terrain-exaggeration-control"
+                  min="1"
+                  max="5"
+                  step="0.1"
+                  value="1"
+                />
+              </label>
+            </div>
+          </details>
+
+          <details class="control-section">
+            <summary>Point cloud</summary>
+            <div class="control-section-body">
+              <label class="camera-control" for="point-offset-control">
+                <span>Point cloud offset</span>
+                <output id="point-offset-value" for="point-offset-control">2 m</output>
+                <input
+                  type="range"
+                  id="point-offset-control"
+                  min="0"
+                  max="10"
+                  step="0.5"
+                  value="2"
+                />
+              </label>
+              <label class="camera-control" for="point-size-control">
+                <span>Point size</span>
+                <output id="point-size-value" for="point-size-control">3 px</output>
+                <input
+                  type="range"
+                  id="point-size-control"
+                  min="1"
+                  max="12"
+                  step="0.5"
+                  value="3"
+                />
+              </label>
+            </div>
+          </details>
+
+          <details class="control-section">
+            <summary>Visual effects</summary>
+            <div class="control-section-body">
+              <label class="camera-control" for="depth-bias-control">
+                <span>Depth advantage</span>
+                <output id="depth-bias-value" for="depth-bias-control">0.0020</output>
+                <input
+                  type="range"
+                  id="depth-bias-control"
+                  min="0"
+                  max="0.01"
+                  step="0.0001"
+                  value="0.002"
+                />
+              </label>
+            </div>
+          </details>
+
+          <details class="control-section">
+            <summary>LAS classifications</summary>
+            <div
+              class="classification-legend"
+              id="classification-legend"
+              aria-label="LAS classification color legend"
+            ></div>
+          </details>
+
+          <label class="file-drop" id="las-drop" for="las-file">
+            <span>Load LAS files</span>
+            <small>Drop one or more .las files or click</small>
+            <input type="file" id="las-file" accept=".las" multiple />
+          </label>
+          <button
+            class="fly-button"
+            id="fly-to-point-cloud"
+            type="button"
+            hidden
+          >
+            Fly To Point Cloud
+          </button>
+          <p class="file-status" id="las-status">No LAS point cloud loaded.</p>
+        </div>
       </section>
 
       <div id="map" class="map" role="application">
-        <p class="map-status" id="map-status">Cargando mapa...</p>
+        <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./script.js?v=17"></script>
+    <script src="./script.js?v=27"></script>
   </body>
 </html>
