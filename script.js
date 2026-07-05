@@ -82,10 +82,12 @@ const lasIndexingModeInputs = document.querySelectorAll(
   "input[name='las-indexing-mode']",
 );
 const fullResolutionToggle = document.querySelector("#full-resolution-toggle");
+const blockBoundsToggle = document.querySelector("#block-bounds-toggle");
 const blockDetailsToggle = document.querySelector("#block-details-toggle");
 const depthBiasControl = document.querySelector("#depth-bias-control");
 const depthBiasValue = document.querySelector("#depth-bias-value");
 const classificationLegend = document.querySelector("#classification-legend");
+const pointCloudStats = document.querySelector("#point-cloud-stats");
 const lasFileInput = document.querySelector("#las-file");
 const lasDrop = document.querySelector("#las-drop");
 const lasStatus = document.querySelector("#las-status");
@@ -101,6 +103,7 @@ let currentTileIndex = [];
 let currentTileCrsByFile = new Map();
 let pointCloudTileRefreshId = 0;
 let volatileTileDbPromise = null;
+let currentPointCloudStats = null;
 
 function setStatus(message) {
   status.textContent = message;
@@ -318,7 +321,7 @@ function addBlockBoundsLayer() {
       type: "line",
       source: layerIds.blockBoundsSource,
       layout: {
-        visibility: blockDetailsToggle.checked ? "visible" : "none",
+        visibility: blockBoundsToggle.checked ? "visible" : "none",
         "line-join": "round",
       },
       paint: {
@@ -745,6 +748,7 @@ function createShader(gl, type, source) {
 
 function bindLayerMenu() {
   renderClassificationLegend();
+  renderPointCloudStats();
 
   menuToggle.addEventListener("click", () => {
     const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
@@ -795,6 +799,11 @@ function bindLayerMenu() {
     const size = getPointSizePixels();
     pointSizeValue.textContent = `${size.toFixed(size % 1 ? 1 : 0)} px`;
     window.mapLibreMap?.triggerRepaint();
+  });
+
+  blockBoundsToggle.addEventListener("change", () => {
+    setBlockBoundsVisible(blockBoundsToggle.checked);
+    renderPointCloudStats();
   });
 
   blockDetailsToggle.addEventListener("change", () => {
@@ -935,11 +944,29 @@ function setBlockDetailsVisible(visible) {
     return;
   }
 
-  [layerIds.blockBoundsLayer, layerIds.blockLabelsLayer].forEach((layerId) => {
-    if (map.getLayer(layerId)) {
-      map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
-    }
-  });
+  if (map.getLayer(layerIds.blockLabelsLayer)) {
+    map.setLayoutProperty(
+      layerIds.blockLabelsLayer,
+      "visibility",
+      visible ? "visible" : "none",
+    );
+  }
+}
+
+function setBlockBoundsVisible(visible) {
+  const map = window.mapLibreMap;
+
+  if (!map) {
+    return;
+  }
+
+  if (map.getLayer(layerIds.blockBoundsLayer)) {
+    map.setLayoutProperty(
+      layerIds.blockBoundsLayer,
+      "visibility",
+      visible ? "visible" : "none",
+    );
+  }
 }
 
 function yieldToBrowser() {
@@ -1390,6 +1417,7 @@ async function applyPointCloudTileSelection(options = {}) {
     if (options.updateStatus !== false) {
       updatePointCloudStatus(0, 0, 0);
     }
+    updateLivePointCloudStats(0, 0, 0);
     return;
   }
 
@@ -1423,6 +1451,11 @@ async function applyPointCloudTileSelection(options = {}) {
   currentPointCloudPoints = points;
   window.pointCloudLayer.setPoints(points, window.mapLibreMap);
   updateBlockBoundsLayer(activeTileMetadata);
+  updateLivePointCloudStats(
+    renderedPointCount,
+    availablePointCount,
+    activeTileMetadata.length,
+  );
 
   if (options.updateStatus !== false) {
     updatePointCloudStatus(
@@ -1846,6 +1879,274 @@ function updatePointCloudStatus(renderedPointCount, availablePointCount, activeT
   lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${renderedPointCount.toLocaleString("en-US")} sampled points rendered from ${availablePointCount.toLocaleString("en-US")} source points - ${crsSummary}`;
 }
 
+function updateLivePointCloudStats(renderedPointCount, availablePointCount, activeTileCount) {
+  if (!currentPointCloudStats) {
+    return;
+  }
+
+  currentPointCloudStats.renderedPointCount = renderedPointCount;
+  currentPointCloudStats.visibleSourcePointCount = availablePointCount;
+  currentPointCloudStats.activeTileCount = activeTileCount;
+  renderPointCloudStats();
+}
+
+function renderPointCloudStats(stats = currentPointCloudStats) {
+  if (!pointCloudStats) {
+    return;
+  }
+
+  if (!stats) {
+    pointCloudStats.replaceChildren(createStatsEmpty("No point cloud loaded."));
+    return;
+  }
+
+  const groups = [
+    {
+      title: "Structure",
+      rows: [
+        ["Type", stats.indexingModeLabel],
+        ["Files", formatInteger(stats.fileCount)],
+        ["Nodes", formatInteger(stats.tileCount)],
+        ["Active nodes", formatInteger(stats.activeTileCount || 0)],
+        ["Loaded node bounds", blockBoundsToggle.checked ? "On" : "Off"],
+      ],
+    },
+    {
+      title: "Points",
+      rows: [
+        ["LAS points", formatInteger(stats.sourcePointCount)],
+        ["Valid projected", formatInteger(stats.validPointCount)],
+        ["Rendered now", formatInteger(stats.renderedPointCount || 0)],
+        ["Visible source", formatInteger(stats.visibleSourcePointCount || 0)],
+        ["Max / node", formatInteger(stats.maxPointsPerNode)],
+        ["Avg / node", formatNumber(stats.averagePointsPerNode, 1)],
+        ["Max sampled / node", formatInteger(stats.maxSampledPointsPerNode)],
+        ["Max full / leaf", formatInteger(stats.maxFullPointsPerLeaf)],
+      ],
+    },
+    {
+      title: "Projection",
+      rows: [
+        ["CRS", stats.crsSummary],
+        ["Kinds", stats.crsKinds.join(", ") || "-"],
+        ["EPSG", stats.crsCodes.join(", ") || "-"],
+        ["Bounds", stats.lngLatBoundsLabel],
+      ],
+    },
+    {
+      title: "Timing",
+      rows: [
+        ["Total", formatDuration(stats.totalMs)],
+        ["Read", formatDuration(stats.readMs)],
+        ["Index", formatDuration(stats.indexMs)],
+        ["IndexedDB", formatDuration(stats.saveMs)],
+        ["Rate", `${formatNumber(stats.pointsPerSecond, 2)} pts/s`],
+      ],
+    },
+  ];
+
+  pointCloudStats.replaceChildren(
+    ...groups.map((group) => createStatsGroup(group.title, group.rows)),
+  );
+}
+
+function createStatsEmpty(message) {
+  const element = document.createElement("p");
+  element.className = "stats-empty";
+  element.textContent = message;
+  return element;
+}
+
+function createStatsGroup(title, rows) {
+  const group = document.createElement("div");
+  group.className = "stats-group";
+
+  const heading = document.createElement("div");
+  heading.className = "stats-group-title";
+  heading.textContent = title;
+  group.append(heading);
+
+  rows.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "stats-row";
+
+    const labelElement = document.createElement("span");
+    labelElement.className = "stats-label";
+    labelElement.textContent = label;
+
+    const valueElement = document.createElement("span");
+    valueElement.className = "stats-value";
+    valueElement.textContent = value ?? "-";
+
+    row.append(labelElement, valueElement);
+    group.append(row);
+  });
+
+  return group;
+}
+
+function formatInteger(value) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return Math.round(value).toLocaleString("en-US");
+}
+
+function formatNumber(value, digits = 0) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  });
+}
+
+function formatDuration(milliseconds) {
+  if (!Number.isFinite(milliseconds)) {
+    return "-";
+  }
+
+  if (milliseconds < 1000) {
+    return `${Math.round(milliseconds)} ms`;
+  }
+
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 2 : 1)} s`;
+}
+
+function createLoadingStats(indexingMode, indexingModeLabel, fileCount) {
+  return {
+    indexingMode,
+    indexingModeLabel,
+    fileCount,
+    tileCount: 0,
+    activeTileCount: 0,
+    sourcePointCount: 0,
+    validPointCount: 0,
+    renderedPointCount: 0,
+    maxPointsPerNode: 0,
+    averagePointsPerNode: 0,
+    maxSampledPointsPerNode: 0,
+    maxFullPointsPerLeaf: 0,
+    crsSummary: "Detecting...",
+    crsKinds: [],
+    crsCodes: [],
+    lngLatBoundsLabel: "-",
+    readMs: 0,
+    indexMs: 0,
+    saveMs: 0,
+    totalMs: 0,
+    pointsPerSecond: 0,
+    fileStats: [],
+  };
+}
+
+function createPointCloudStats({
+  indexingMode,
+  indexingModeLabel,
+  files,
+  tiles,
+  crsEntries,
+  crsLabels,
+  fileStats,
+  loadStartedAt,
+  loadFinishedAt,
+}) {
+  const sourcePointCount = fileStats.reduce(
+    (sum, file) => sum + (file.sourcePointCount || 0),
+    0,
+  );
+  const validPointCount = fileStats.reduce(
+    (sum, file) => sum + (file.validPointCount || 0),
+    0,
+  );
+  const readMs = fileStats.reduce((sum, file) => sum + (file.readMs || 0), 0);
+  const indexMs = fileStats.reduce((sum, file) => sum + (file.indexMs || 0), 0);
+  const saveMs = fileStats.reduce((sum, file) => sum + (file.saveMs || 0), 0);
+  const pointCounts = tiles.map((tile) => tile.sourcePointCount || tile.pointCount || 0);
+  const sampledCounts = tiles.map((tile) => tile.sampledPointCount || 0);
+  const fullLeafCounts = tiles
+    .filter((tile) => !tile.childIds?.length)
+    .map((tile) => tile.fullPointCount || 0);
+  const totalNodePointReferences = pointCounts.reduce((sum, count) => sum + count, 0);
+  const uniqueCrsLabels = [...new Set(crsLabels)];
+  const crsValues = [...new Map(crsEntries).values()];
+  const crsKinds = [...new Set(crsValues.map((crs) => crs.kind).filter(Boolean))];
+  const crsCodes = [
+    ...new Set(
+      crsValues
+        .map((crs) => crs.code)
+        .filter((code) => code !== null && code !== undefined),
+    ),
+  ].map((code) => `EPSG:${code}`);
+  const totalMs = loadFinishedAt - loadStartedAt;
+
+  return {
+    indexingMode,
+    indexingModeLabel,
+    fileCount: files.length,
+    tileCount: tiles.length,
+    activeTileCount: 0,
+    sourcePointCount,
+    validPointCount,
+    renderedPointCount: 0,
+    maxPointsPerNode: Math.max(0, ...pointCounts),
+    averagePointsPerNode: tiles.length ? totalNodePointReferences / tiles.length : 0,
+    maxSampledPointsPerNode: Math.max(0, ...sampledCounts),
+    maxFullPointsPerLeaf: Math.max(0, ...fullLeafCounts),
+    crsSummary:
+      uniqueCrsLabels.length === 1
+        ? uniqueCrsLabels[0]
+        : `${uniqueCrsLabels.length} coordinate systems`,
+    crsKinds,
+    crsCodes,
+    lngLatBoundsLabel: formatLngLatBounds(getTilesLngLatBounds(tiles)),
+    readMs,
+    indexMs,
+    saveMs,
+    totalMs,
+    pointsPerSecond: indexMs > 0 ? validPointCount / (indexMs / 1000) : 0,
+    fileStats,
+  };
+}
+
+function getTilesLngLatBounds(tiles) {
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+
+  tiles.forEach((tile) => {
+    (tile.corners || []).forEach(([lng, lat]) => {
+      minLng = Math.min(minLng, lng);
+      maxLng = Math.max(maxLng, lng);
+      minLat = Math.min(minLat, lat);
+      maxLat = Math.max(maxLat, lat);
+    });
+  });
+
+  if (
+    !Number.isFinite(minLng) ||
+    !Number.isFinite(maxLng) ||
+    !Number.isFinite(minLat) ||
+    !Number.isFinite(maxLat)
+  ) {
+    return null;
+  }
+
+  return { minLng, maxLng, minLat, maxLat };
+}
+
+function formatLngLatBounds(bounds) {
+  if (!bounds) {
+    return "-";
+  }
+
+  return `${bounds.minLng.toFixed(5)}, ${bounds.minLat.toFixed(5)} / ${bounds.maxLng.toFixed(5)}, ${bounds.maxLat.toFixed(5)}`;
+}
+
 async function loadLasFiles(files) {
   if (!window.pointCloudLayer || !window.mapLibreMap) {
     lasStatus.textContent = "Wait for the map to finish loading.";
@@ -1857,6 +2158,13 @@ async function loadLasFiles(files) {
   const indexingMode = getSelectedLasIndexingMode();
   const indexingModeLabel = getLasIndexingModeLabel(indexingMode);
   lasStatus.textContent = `Preparing ${fileLabel} with ${indexingModeLabel}...`;
+  const loadStartedAt = performance.now();
+  currentPointCloudStats = createLoadingStats(
+    indexingMode,
+    indexingModeLabel,
+    files.length,
+  );
+  renderPointCloudStats();
 
   try {
     await clearVolatileTileDb();
@@ -1870,15 +2178,20 @@ async function loadLasFiles(files) {
     currentTileCrsByFile = new Map();
     window.pointCloudLayer.setPoints([], window.mapLibreMap);
     updateBlockBoundsLayer([]);
+    renderPointCloudStats();
     const allPoints = [];
     const allTiles = [];
     const crsLabels = [];
     const crsEntries = [];
+    const fileStats = [];
 
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
       lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length})...`;
+      const readStartedAt = performance.now();
       const buffer = await file.arrayBuffer();
+      const readFinishedAt = performance.now();
+      const indexStartedAt = performance.now();
       const result = await parseLasPointCloud(buffer, {
         fileIndex: index,
         fileName: file.name,
@@ -1888,13 +2201,25 @@ async function loadLasFiles(files) {
           lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}%...`;
         },
       });
+      const indexFinishedAt = performance.now();
 
       lasStatus.textContent = `Saving ${result.tileRecords.length.toLocaleString("en-US")} ${indexingModeLabel} tiles from ${file.name}...`;
+      const saveStartedAt = performance.now();
       await saveTileRecords(result.tileRecords);
+      const saveFinishedAt = performance.now();
       allPoints.push(...result.points);
       allTiles.push(...result.tiles);
       crsLabels.push(result.crsLabel);
       crsEntries.push([result.fileIndex, result.crs]);
+      fileStats.push({
+        name: file.name,
+        sourcePointCount: result.sourcePointCount || 0,
+        validPointCount: result.validPointCount || 0,
+        tileCount: result.tiles.length,
+        readMs: readFinishedAt - readStartedAt,
+        indexMs: indexFinishedAt - indexStartedAt,
+        saveMs: saveFinishedAt - saveStartedAt,
+      });
       await yieldToBrowser();
     }
 
@@ -1912,18 +2237,25 @@ async function loadLasFiles(files) {
     }
 
     flyToCurrentPointCloud();
-    const uniqueCrsLabels = [...new Set(crsLabels)];
-    const crsSummary =
-      uniqueCrsLabels.length === 1
-        ? uniqueCrsLabels[0]
-        : `${uniqueCrsLabels.length} coordinate systems`;
+    currentPointCloudStats = createPointCloudStats({
+      indexingMode,
+      indexingModeLabel,
+      files,
+      tiles: allTiles,
+      crsEntries,
+      crsLabels,
+      fileStats,
+      loadStartedAt,
+      loadFinishedAt: performance.now(),
+    });
     currentPointCloudSummary = {
       fileCount: files.length,
       tileCount: allTiles.length,
-      crsSummary,
+      crsSummary: currentPointCloudStats.crsSummary,
       indexingMode,
       indexingModeLabel,
     };
+    renderPointCloudStats();
     await applyPointCloudTileSelection({ updateStatus: true });
   } catch (error) {
     console.error(error);
@@ -2277,6 +2609,8 @@ async function parseLasPointCloudQuadtree(buffer, options = {}) {
     points: rootTile.points,
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
+    sourcePointCount: totalPoints,
+    validPointCount: rootTile.originalPointCount,
     crsLabel: crs.label,
   };
 }
@@ -2385,6 +2719,8 @@ async function parseLasPointCloudM3no(buffer, options = {}) {
     points: rootTile.points,
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
+    sourcePointCount: totalPoints,
+    validPointCount: rootTile.originalPointCount,
     crsLabel: crs.label,
   };
 }

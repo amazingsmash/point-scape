@@ -118,6 +118,8 @@ function parseLasPointCloudQuadtree(buffer, options = {}) {
     points: [packPoints(rootTile.points)],
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
+    sourcePointCount: totalPoints,
+    validPointCount: rootTile.originalPointCount,
     crsLabel: crs.label,
   };
 }
@@ -209,6 +211,8 @@ function parseLasPointCloudM3no(buffer, options = {}) {
     points: [packPoints(rootTile.points)],
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
+    sourcePointCount: totalPoints,
+    validPointCount: rootTile.originalPointCount,
     crsLabel: crs.label,
   };
 }

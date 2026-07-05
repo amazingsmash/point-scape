@@ -104,6 +104,10 @@
                 <span>Full points when close</span>
               </label>
               <label class="layer-option layer-option-toggle">
+                <input type="checkbox" id="block-bounds-toggle" />
+                <span>Loaded node bounds</span>
+              </label>
+              <label class="layer-option layer-option-toggle">
                 <input type="checkbox" id="block-details-toggle" />
                 <span>Tile details</span>
               </label>
@@ -150,6 +154,15 @@
                 />
               </label>
             </div>
+          </details>
+
+          <details class="control-section" open>
+            <summary>Point cloud stats</summary>
+            <div
+              class="stats-panel"
+              id="point-cloud-stats"
+              aria-live="polite"
+            ></div>
           </details>
 
           <details class="control-section">

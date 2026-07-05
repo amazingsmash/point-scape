@@ -312,6 +312,55 @@ body {
   accent-color: var(--accent);
 }
 
+.stats-panel {
+  display: grid;
+  gap: 8px;
+  padding: 0 2px 14px;
+}
+
+.stats-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.stats-group {
+  display: grid;
+  gap: 5px;
+}
+
+.stats-group-title {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  min-height: 20px;
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.stats-label {
+  color: var(--muted);
+}
+
+.stats-value {
+  max-width: 150px;
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
 .file-drop {
   display: grid;
   gap: 4px;
