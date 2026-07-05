@@ -111,6 +111,57 @@
                 <input type="checkbox" id="block-details-toggle" />
                 <span>Tile details</span>
               </label>
+              <fieldset class="lod-control-group" aria-label="LOD parameters">
+                <legend>LOD controls</legend>
+                <label class="camera-control" for="lod-screen-diagonal-control">
+                  <span>Screen threshold</span>
+                  <output id="lod-screen-diagonal-value" for="lod-screen-diagonal-control">48 px</output>
+                  <input
+                    type="range"
+                    id="lod-screen-diagonal-control"
+                    min="12"
+                    max="160"
+                    step="1"
+                    value="48"
+                  />
+                </label>
+                <label class="camera-control" for="lod-hysteresis-control">
+                  <span>LOD hysteresis</span>
+                  <output id="lod-hysteresis-value" for="lod-hysteresis-control">10%</output>
+                  <input
+                    type="range"
+                    id="lod-hysteresis-control"
+                    min="0"
+                    max="0.5"
+                    step="0.01"
+                    value="0.1"
+                  />
+                </label>
+                <label class="numeric-control" for="tile-min-diagonal-control">
+                  <span>Min node diagonal</span>
+                  <input
+                    type="number"
+                    id="tile-min-diagonal-control"
+                    min="1"
+                    max="5000"
+                    step="1"
+                    value="100"
+                  />
+                  <small>m</small>
+                </label>
+                <label class="numeric-control" for="tile-max-depth-control">
+                  <span>Max tree depth</span>
+                  <input
+                    type="number"
+                    id="tile-max-depth-control"
+                    min="1"
+                    max="16"
+                    step="1"
+                    value="8"
+                  />
+                  <small>levels</small>
+                </label>
+              </fieldset>
               <label class="camera-control" for="point-offset-control">
                 <span>Point cloud offset</span>
                 <output id="point-offset-value" for="point-offset-control">2 m</output>
@@ -167,6 +218,13 @@
 
           <details class="control-section">
             <summary>LAS classifications</summary>
+            <button
+              class="secondary-button"
+              id="randomize-classification-colors"
+              type="button"
+            >
+              Randomize colors
+            </button>
             <div
               class="classification-legend"
               id="classification-legend"
@@ -195,6 +253,6 @@
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./script.js?v=39"></script>
+    <script src="./script.js?v=44"></script>
   </body>
 </html>

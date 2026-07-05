@@ -4,6 +4,8 @@ const defaultPointCloudConfig = {
   tileMinDiagonalMeters: 100,
   tileMaxDepth: 8,
   parseYieldEveryPoints: 5000,
+  progressiveTilePointInterval: 100000,
+  progressiveTileMinimumMs: 300,
   indexedDbWriteBatchSize: 128,
 };
 
@@ -19,11 +21,26 @@ self.onmessage = (event) => {
   pointCloudConfig = { ...defaultPointCloudConfig, ...config };
 
   try {
+    const progressiveCallbacks =
+      pointCloudConfig.progressiveLoadingPreview === true
+        ? {
+            onMetadata: (metadata) => {
+              self.postMessage({ type: "metadata", metadata });
+            },
+            onTiles: (tileRecords, details) => {
+              self.postMessage(
+                { type: "tiles", tileRecords, details },
+                collectTileRecordTransferList(tileRecords),
+              );
+            },
+          }
+        : {};
     const result = parseLasPointCloud(buffer, {
       ...options,
       onProgress: (processed, total) => {
         self.postMessage({ type: "progress", processed, total });
       },
+      ...progressiveCallbacks,
     });
     const transferList = collectResultTransferList(result);
     self.postMessage({ type: "done", result }, transferList);
@@ -63,6 +80,24 @@ function parseLasPointCloudQuadtree(buffer, options = {}) {
     crs,
   });
   tileStates.set(rootTile.id, rootTile);
+  options.onMetadata?.(
+    createLasMetadata({
+      fileIndex,
+      fileName: options.fileName || "",
+      indexingMode: "quadtree",
+      crs,
+      rootTile,
+      totalPoints,
+    }),
+  );
+
+  const emitProgressiveTiles = createProgressiveTileEmitter({
+    tileStates,
+    fileName: options.fileName || "",
+    crs,
+    totalPoints,
+    options,
+  });
 
   for (let pointIndex = 0; pointIndex < totalPoints; pointIndex += 1) {
     const offset = header.pointDataOffset + pointIndex * header.pointRecordLength;
@@ -102,6 +137,7 @@ function parseLasPointCloudQuadtree(buffer, options = {}) {
       pointIndex % pointCloudConfig.parseYieldEveryPoints === 0
     ) {
       options.onProgress?.(pointIndex, totalPoints);
+      emitProgressiveTiles(pointIndex);
     }
   }
   options.onProgress?.(totalPoints, totalPoints);
@@ -111,6 +147,7 @@ function parseLasPointCloudQuadtree(buffer, options = {}) {
   }
 
   const tileRecords = createTileRecords(tileStates, options.fileName || "", crs);
+  emitProgressiveTiles(totalPoints, { force: true });
 
   return {
     fileIndex,
@@ -144,6 +181,25 @@ function parseLasPointCloudM3no(buffer, options = {}) {
     crs,
   });
   tileStates.set(rootTile.id, rootTile);
+  options.onMetadata?.(
+    createLasMetadata({
+      fileIndex,
+      fileName: options.fileName || "",
+      indexingMode: "m3no",
+      crs,
+      rootTile,
+      totalPoints,
+    }),
+  );
+
+  const emitProgressiveTiles = createProgressiveTileEmitter({
+    tileStates,
+    fileName: options.fileName || "",
+    crs,
+    totalPoints,
+    options,
+    beforeSnapshot: () => finalizeM3noTileSamples(tileStates),
+  });
 
   for (let pointIndex = 0; pointIndex < totalPoints; pointIndex += 1) {
     const offset = header.pointDataOffset + pointIndex * header.pointRecordLength;
@@ -194,6 +250,7 @@ function parseLasPointCloudM3no(buffer, options = {}) {
       pointIndex % pointCloudConfig.parseYieldEveryPoints === 0
     ) {
       options.onProgress?.(pointIndex, totalPoints);
+      emitProgressiveTiles(pointIndex);
     }
   }
   options.onProgress?.(totalPoints, totalPoints);
@@ -204,6 +261,7 @@ function parseLasPointCloudM3no(buffer, options = {}) {
 
   finalizeM3noTileSamples(tileStates);
   const tileRecords = createTileRecords(tileStates, options.fileName || "", crs);
+  emitProgressiveTiles(totalPoints, { force: true });
 
   return {
     fileIndex,
@@ -250,20 +308,97 @@ function packPoints(points) {
 
 function collectResultTransferList(result) {
   const transfers = [];
-  const pushPointSet = (pointSet) => {
-    if (!pointSet) {
-      return;
-    }
-    transfers.push(pointSet.lngLatAlt.buffer, pointSet.classifications.buffer);
-  };
 
-  result.points.forEach(pushPointSet);
-  result.tileRecords.forEach((record) => {
-    pushPointSet(record.points);
-    pushPointSet(record.fullPoints);
+  result.points.forEach((pointSet) => pushPointSetTransfer(transfers, pointSet));
+  collectTileRecordTransferList(result.tileRecords).forEach((buffer) => {
+    transfers.push(buffer);
   });
 
   return transfers;
+}
+
+function collectTileRecordTransferList(tileRecords) {
+  const transfers = [];
+
+  tileRecords.forEach((record) => {
+    pushPointSetTransfer(transfers, record.points);
+    pushPointSetTransfer(transfers, record.fullPoints);
+  });
+
+  return transfers;
+}
+
+function pushPointSetTransfer(transfers, pointSet) {
+  if (!pointSet) {
+    return;
+  }
+
+  transfers.push(pointSet.lngLatAlt.buffer, pointSet.classifications.buffer);
+}
+
+function createLasMetadata({
+  fileIndex,
+  fileName,
+  indexingMode,
+  crs,
+  rootTile,
+  totalPoints,
+}) {
+  return {
+    fileIndex,
+    fileName,
+    indexingMode,
+    crs,
+    crsLabel: crs.label,
+    sourcePointCount: totalPoints,
+    rootTile: createTileMetadataRecord(
+      createTileRecord(rootTile, new Map([[rootTile.id, rootTile]]), fileName, crs),
+    ),
+  };
+}
+
+function createProgressiveTileEmitter({
+  tileStates,
+  fileName,
+  crs,
+  totalPoints,
+  options,
+  beforeSnapshot,
+}) {
+  let lastEmittedPoint = 0;
+  let lastEmittedAt = 0;
+
+  return (processed, { force = false } = {}) => {
+    if (!options.onTiles) {
+      return;
+    }
+
+    const now = performance.now();
+    const processedDelta = processed - lastEmittedPoint;
+    const enoughPoints =
+      processedDelta >= pointCloudConfig.progressiveTilePointInterval;
+    const enoughTime =
+      now - lastEmittedAt >= pointCloudConfig.progressiveTileMinimumMs;
+
+    if (!force && (!enoughPoints || !enoughTime)) {
+      return;
+    }
+
+    beforeSnapshot?.();
+    const tileRecords = createTileRecords(tileStates, fileName, crs);
+
+    if (!tileRecords.length) {
+      return;
+    }
+
+    lastEmittedPoint = processed;
+    lastEmittedAt = now;
+    options.onTiles(tileRecords, {
+      processed,
+      total: totalPoints,
+      isFinal: force,
+    });
+  };
 }
 
 function getLasMetricBounds(header, crs) {
