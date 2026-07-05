@@ -418,7 +418,7 @@ function createWebGlPointCloudLayer() {
       }
 
       this.points = points;
-      this.pointCount = points.length;
+      this.pointCount = getPointCollectionCount(points);
       this.updateElevationBuffer(map);
     },
 
@@ -513,7 +513,8 @@ function createWebGlPointCloudLayer() {
 }
 
 function createPointCloudBuffer(points, map, useTerrainElevation) {
-  const positions = new Float32Array(points.length * 7);
+  const pointCount = getPointCollectionCount(points);
+  const positions = new Float32Array(pointCount * 7);
   const verticalExaggeration = useTerrainElevation ? getTerrainExaggeration() : 1;
   const pointOffsetMeters = getPointCloudOffsetMeters();
   const anchorMercator = createPointCloudMercatorAnchor(
@@ -524,7 +525,8 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
     pointOffsetMeters,
   );
 
-  points.forEach((point, index) => {
+  let index = 0;
+  forEachPointInCollection(points, (point) => {
     const hasPointAltitude = Number.isFinite(point.altitudeMeters);
     const elevation = hasPointAltitude
       ? point.altitudeMeters * verticalExaggeration + pointOffsetMeters
@@ -547,6 +549,7 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
     positions[offset + 4] = color[1];
     positions[offset + 5] = color[2];
     positions[offset + 6] = color[3];
+    index += 1;
   });
 
   return {
@@ -562,7 +565,7 @@ function createPointCloudMercatorAnchor(
   verticalExaggeration,
   pointOffsetMeters,
 ) {
-  if (!points.length) {
+  if (!getPointCollectionCount(points)) {
     return [0, 0, 0];
   }
 
@@ -573,7 +576,7 @@ function createPointCloudMercatorAnchor(
   let minElevation = Infinity;
   let maxElevation = -Infinity;
 
-  points.forEach((point) => {
+  forEachPointInCollection(points, (point) => {
     const hasPointAltitude = Number.isFinite(point.altitudeMeters);
     const elevation = hasPointAltitude
       ? point.altitudeMeters * verticalExaggeration + pointOffsetMeters
@@ -1398,6 +1401,7 @@ async function applyPointCloudTileSelection(options = {}) {
 
   const activeTilesById = new Map(activeTiles.map((tile) => [tile.id, tile]));
   const points = [];
+  let renderedPointCount = 0;
   let availablePointCount = 0;
 
   activeTileMetadata.forEach((metadata) => {
@@ -1408,8 +1412,12 @@ async function applyPointCloudTileSelection(options = {}) {
       record.sourcePointCount ||
       record.originalPointCount ||
       record.fullPointCount ||
-      tilePoints.length;
-    points.push(...tilePoints);
+      getPointSetCount(tilePoints);
+    renderedPointCount += getPointSetCount(tilePoints);
+
+    if (getPointSetCount(tilePoints) > 0) {
+      points.push(tilePoints);
+    }
   });
 
   currentPointCloudPoints = points;
@@ -1418,7 +1426,7 @@ async function applyPointCloudTileSelection(options = {}) {
 
   if (options.updateStatus !== false) {
     updatePointCloudStatus(
-      points.length,
+      renderedPointCount,
       availablePointCount,
       activeTileMetadata.length,
     );
@@ -1439,6 +1447,80 @@ function getRenderableTilePoints(record) {
 
 function isFullResolutionTile(record) {
   return !record.childIds?.length;
+}
+
+function isPackedPointSet(pointSet) {
+  return Boolean(pointSet?.lngLatAlt?.buffer && pointSet?.classifications?.buffer);
+}
+
+function isPointObject(value) {
+  return Number.isFinite(value?.lng) && Number.isFinite(value?.lat);
+}
+
+function getPointSetCount(pointSet) {
+  if (!pointSet) {
+    return 0;
+  }
+
+  if (isPackedPointSet(pointSet)) {
+    return pointSet.pointCount || pointSet.classifications.length || 0;
+  }
+
+  if (isPointObject(pointSet)) {
+    return 1;
+  }
+
+  return Array.isArray(pointSet) ? pointSet.length : 0;
+}
+
+function getPointCollectionCount(pointSets) {
+  if (!Array.isArray(pointSets)) {
+    return getPointSetCount(pointSets);
+  }
+
+  return pointSets.reduce((sum, pointSet) => sum + getPointSetCount(pointSet), 0);
+}
+
+function forEachPointInCollection(pointSets, callback) {
+  if (!Array.isArray(pointSets)) {
+    forEachPointInSet(pointSets, callback);
+    return;
+  }
+
+  pointSets.forEach((pointSet) => {
+    forEachPointInSet(pointSet, callback);
+  });
+}
+
+function forEachPointInSet(pointSet, callback) {
+  if (!pointSet) {
+    return;
+  }
+
+  if (isPackedPointSet(pointSet)) {
+    const { lngLatAlt, classifications } = pointSet;
+    const pointCount = getPointSetCount(pointSet);
+
+    for (let index = 0; index < pointCount; index += 1) {
+      const offset = index * 3;
+      callback({
+        lng: lngLatAlt[offset],
+        lat: lngLatAlt[offset + 1],
+        altitudeMeters: lngLatAlt[offset + 2],
+        classification: classifications[index] || 0,
+      });
+    }
+    return;
+  }
+
+  if (Array.isArray(pointSet)) {
+    pointSet.forEach(callback);
+    return;
+  }
+
+  if (isPointObject(pointSet)) {
+    callback(pointSet);
+  }
 }
 
 function selectActiveTiles(records, map) {
@@ -1924,7 +2006,7 @@ function allocateRareClassBudgets(classCounts, maximumPoints) {
 
 function flyToCurrentPointCloud() {
   flyToLasPoints(
-    currentPointCloudFlyToPoints.length
+    getPointCollectionCount(currentPointCloudFlyToPoints)
       ? currentPointCloudFlyToPoints
       : currentPointCloudPoints,
   );
@@ -1961,7 +2043,7 @@ function flyToLasPoints(points) {
 }
 
 function getPointCloudMaxRenderedAltitude(points) {
-  if (!points.length || !window.mapLibreMap) {
+  if (!getPointCollectionCount(points) || !window.mapLibreMap) {
     return 0;
   }
 
@@ -1969,10 +2051,15 @@ function getPointCloudMaxRenderedAltitude(points) {
   const verticalExaggeration = useTerrainElevation ? getTerrainExaggeration() : 1;
   const pointOffsetMeters = getPointCloudOffsetMeters();
   let maxAltitude = 0;
-  const stride = Math.max(1, Math.ceil(points.length / 2000));
+  const stride = Math.max(1, Math.ceil(getPointCollectionCount(points) / 2000));
+  let visitedPointCount = 0;
 
-  for (let index = 0; index < points.length; index += stride) {
-    const point = points[index];
+  forEachPointInCollection(points, (point) => {
+    visitedPointCount += 1;
+    if (visitedPointCount % stride !== 0) {
+      return;
+    }
+
     const altitude = Number.isFinite(point.altitudeMeters)
       ? point.altitudeMeters * verticalExaggeration + pointOffsetMeters
       : useTerrainElevation
@@ -1981,7 +2068,7 @@ function getPointCloudMaxRenderedAltitude(points) {
         : pointOffsetMeters;
 
     maxAltitude = Math.max(maxAltitude, altitude);
-  }
+  });
 
   return maxAltitude;
 }
@@ -2004,7 +2091,7 @@ function getZoomForApproxCameraAltitude(lat, altitudeMeters, pitch) {
 }
 
 function getPointCloudCenter(points) {
-  if (!points.length) {
+  if (!getPointCollectionCount(points)) {
     return { lng: lasPalmas.coordinates[0], lat: lasPalmas.coordinates[1] };
   }
 
@@ -2012,8 +2099,10 @@ function getPointCloudCenter(points) {
   let maxLng = -Infinity;
   let minLat = Infinity;
   let maxLat = -Infinity;
+  let firstPoint = null;
 
-  points.forEach((point) => {
+  forEachPointInCollection(points, (point) => {
+    firstPoint ||= point;
     minLng = Math.min(minLng, point.lng);
     maxLng = Math.max(maxLng, point.lng);
     minLat = Math.min(minLat, point.lat);
@@ -2026,7 +2115,7 @@ function getPointCloudCenter(points) {
     !Number.isFinite(minLat) ||
     !Number.isFinite(maxLat)
   ) {
-    return points[0];
+    return firstPoint || { lng: lasPalmas.coordinates[0], lat: lasPalmas.coordinates[1] };
   }
 
   return {
@@ -2036,11 +2125,64 @@ function getPointCloudCenter(points) {
 }
 
 async function parseLasPointCloud(buffer, options = {}) {
+  if (typeof Worker !== "undefined") {
+    return parseLasPointCloudInWorker(buffer, options);
+  }
+
   if (options.indexingMode === "m3no") {
     return parseLasPointCloudM3no(buffer, options);
   }
 
   return parseLasPointCloudQuadtree(buffer, options);
+}
+
+function parseLasPointCloudInWorker(buffer, options = {}) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("./las-index.worker.js");
+    const { onProgress, ...workerOptions } = options;
+
+    worker.onmessage = (event) => {
+      const message = event.data || {};
+
+      if (message.type === "progress") {
+        onProgress?.(message.processed, message.total);
+        return;
+      }
+
+      if (message.type === "done") {
+        worker.terminate();
+        resolve(message.result);
+        return;
+      }
+
+      if (message.type === "error") {
+        worker.terminate();
+        reject(new Error(message.message || "The LAS file could not be indexed."));
+      }
+    };
+
+    worker.onerror = (error) => {
+      worker.terminate();
+      reject(new Error(error.message || "The LAS indexing worker failed."));
+    };
+
+    worker.postMessage(
+      {
+        type: "parse-las",
+        buffer,
+        options: workerOptions,
+        config: {
+          tileSamplePoints: pointCloudConfig.tileSamplePoints,
+          m3noGridCellsPerAxis: pointCloudConfig.m3noGridCellsPerAxis,
+          tileMinDiagonalMeters: pointCloudConfig.tileMinDiagonalMeters,
+          tileMaxDepth: pointCloudConfig.tileMaxDepth,
+          parseYieldEveryPoints: pointCloudConfig.parseYieldEveryPoints,
+          indexedDbWriteBatchSize: pointCloudConfig.indexedDbWriteBatchSize,
+        },
+      },
+      [buffer],
+    );
+  });
 }
 
 async function parseLasPointCloudQuadtree(buffer, options = {}) {
