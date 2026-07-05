@@ -79,6 +79,34 @@
           <details class="control-section">
             <summary>Point cloud</summary>
             <div class="control-section-body">
+              <fieldset class="indexing-mode-control" aria-label="LAS indexing mode">
+                <legend>LAS indexing</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="las-indexing-mode"
+                    value="quadtree"
+                  />
+                  <span>QuadTree</span>
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="las-indexing-mode"
+                    value="m3no"
+                    checked
+                  />
+                  <span>M3NO</span>
+                </label>
+              </fieldset>
+              <label class="layer-option layer-option-toggle">
+                <input type="checkbox" id="full-resolution-toggle" checked />
+                <span>Full points when close</span>
+              </label>
+              <label class="layer-option layer-option-toggle">
+                <input type="checkbox" id="block-details-toggle" />
+                <span>Tile details</span>
+              </label>
               <label class="camera-control" for="point-offset-control">
                 <span>Point cloud offset</span>
                 <output id="point-offset-value" for="point-offset-control">2 m</output>
@@ -154,6 +182,6 @@
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./script.js?v=27"></script>
+    <script src="./script.js?v=39"></script>
   </body>
 </html>

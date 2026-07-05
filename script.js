@@ -20,12 +20,28 @@ const layerIds = {
   satelliteLayer: "satellite-photos-layer",
   terrainSource: "terrain-dem",
   hillshadeLayer: "terrain-hillshade",
+  blockBoundsSource: "las-block-bounds",
+  blockBoundsLayer: "las-block-bounds-layer",
+  blockLabelsLayer: "las-block-labels-layer",
   pointCloudLayer: "las-palmas-webgl-point-cloud",
 };
 
 const pointCloudConfig = {
-  maxLasPoints: 1000000,
+  tileSamplePoints: 25000,
+  m3noGridCellsPerAxis: 32,
+  tileMinDiagonalMeters: 100,
+  tileMaxDepth: 8,
+  fullResolutionScreenDiagonalPixels: 48,
+  tileCollapseHysteresisRatio: 0.1,
+  parseYieldEveryPoints: 5000,
+  indexedDbWriteBatchSize: 128,
   flyToClearanceMeters: 1000,
+};
+
+const volatileTileDbConfig = {
+  name: "pointscape-volatile-tiles",
+  version: 1,
+  storeName: "tiles",
 };
 
 const lasClassifications = [
@@ -62,6 +78,11 @@ const pointOffsetControl = document.querySelector("#point-offset-control");
 const pointOffsetValue = document.querySelector("#point-offset-value");
 const pointSizeControl = document.querySelector("#point-size-control");
 const pointSizeValue = document.querySelector("#point-size-value");
+const lasIndexingModeInputs = document.querySelectorAll(
+  "input[name='las-indexing-mode']",
+);
+const fullResolutionToggle = document.querySelector("#full-resolution-toggle");
+const blockDetailsToggle = document.querySelector("#block-details-toggle");
 const depthBiasControl = document.querySelector("#depth-bias-control");
 const depthBiasValue = document.querySelector("#depth-bias-value");
 const classificationLegend = document.querySelector("#classification-legend");
@@ -71,6 +92,15 @@ const lasStatus = document.querySelector("#las-status");
 const flyToPointCloudButton = document.querySelector("#fly-to-point-cloud");
 
 let currentPointCloudPoints = [];
+let currentPointCloudFlyToPoints = [];
+let currentPointCloudTiles = [];
+let currentPointCloudSummary = null;
+let currentActiveTileIds = new Set();
+let currentExpandedTileIds = new Set();
+let currentTileIndex = [];
+let currentTileCrsByFile = new Map();
+let pointCloudTileRefreshId = 0;
+let volatileTileDbPromise = null;
 
 function setStatus(message) {
   status.textContent = message;
@@ -148,6 +178,7 @@ function initMap() {
     container: "map",
     style: {
       version: 8,
+      glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
       sources: {},
       layers: [
         {
@@ -187,6 +218,11 @@ function initMap() {
     syncInitialLayerState();
     status.classList.add("is-hidden");
     window.mapLibreMap.resize();
+  });
+
+  window.mapLibreMap.on("moveend", () => {
+    refreshTileBounds();
+    schedulePointCloudTileRefresh();
   });
 
   window.mapLibreMap.addControl(
@@ -260,8 +296,61 @@ function addMapLayers() {
   }
 
   if (!map.getLayer(layerIds.pointCloudLayer)) {
+    addBlockBoundsLayer();
     window.pointCloudLayer = createWebGlPointCloudLayer();
     map.addLayer(window.pointCloudLayer);
+  }
+}
+
+function addBlockBoundsLayer() {
+  const map = window.mapLibreMap;
+
+  if (!map.getSource(layerIds.blockBoundsSource)) {
+    map.addSource(layerIds.blockBoundsSource, {
+      type: "geojson",
+      data: createBlockBoundsGeoJson([]),
+    });
+  }
+
+  if (!map.getLayer(layerIds.blockBoundsLayer)) {
+    map.addLayer({
+      id: layerIds.blockBoundsLayer,
+      type: "line",
+      source: layerIds.blockBoundsSource,
+      layout: {
+        visibility: blockDetailsToggle.checked ? "visible" : "none",
+        "line-join": "round",
+      },
+      paint: {
+        "line-color": "#0f766e",
+        "line-opacity": 0.9,
+        "line-width": 1.8,
+      },
+    });
+  }
+
+  if (!map.getLayer(layerIds.blockLabelsLayer)) {
+    map.addLayer({
+      id: layerIds.blockLabelsLayer,
+      type: "symbol",
+      source: layerIds.blockBoundsSource,
+      layout: {
+        visibility: blockDetailsToggle.checked ? "visible" : "none",
+        "symbol-placement": "point",
+        "text-field": ["get", "detailLabel"],
+        "text-size": 11,
+        "text-font": ["Open Sans Semibold", "Arial Unicode MS Bold"],
+        "text-offset": [0, -0.9],
+        "text-anchor": "bottom",
+        "text-allow-overlap": false,
+        "text-ignore-placement": false,
+      },
+      paint: {
+        "text-color": "#073b3a",
+        "text-halo-color": "rgba(255, 255, 255, 0.92)",
+        "text-halo-width": 1.4,
+      },
+    });
   }
 }
 
@@ -274,11 +363,13 @@ function createWebGlPointCloudLayer() {
     onAdd(map, gl) {
       this.pointCount = 0;
       this.points = [];
-      this.pointBuffer = createPointCloudBuffer(
+      const pointBuffer = createPointCloudBuffer(
         this.points,
         map,
         terrainToggle.checked,
       );
+      this.pointBuffer = pointBuffer.data;
+      this.anchorMercator = pointBuffer.anchorMercator;
       this.gl = gl;
 
       const isWebGl2 =
@@ -290,6 +381,7 @@ function createWebGlPointCloudLayer() {
       this.positionLocation = gl.getAttribLocation(this.program, "a_position");
       this.colorLocation = gl.getAttribLocation(this.program, "a_color");
       this.matrixLocation = gl.getUniformLocation(this.program, "u_matrix");
+      this.anchorClipLocation = gl.getUniformLocation(this.program, "u_anchor_clip");
       this.pointSizeLocation = gl.getUniformLocation(this.program, "u_point_size");
       this.depthBiasLocation = gl.getUniformLocation(this.program, "u_depth_bias");
 
@@ -304,11 +396,13 @@ function createWebGlPointCloudLayer() {
         return;
       }
 
-      this.pointBuffer = createPointCloudBuffer(
+      const pointBuffer = createPointCloudBuffer(
         this.points,
         map,
         terrainToggle.checked,
       );
+      this.pointBuffer = pointBuffer.data;
+      this.anchorMercator = pointBuffer.anchorMercator;
 
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.buffer);
       this.gl.bufferData(this.gl.ARRAY_BUFFER, this.pointBuffer, this.gl.DYNAMIC_DRAW);
@@ -336,6 +430,10 @@ function createWebGlPointCloudLayer() {
 
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
+      gl.uniform4fv(
+        this.anchorClipLocation,
+        multiplyMatrixAndMercatorPoint(matrix, this.anchorMercator),
+      );
       gl.uniform1f(this.pointSizeLocation, getPointSizePixels());
       gl.uniform1f(this.depthBiasLocation, getDepthBias());
 
@@ -418,6 +516,13 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
   const positions = new Float32Array(points.length * 7);
   const verticalExaggeration = useTerrainElevation ? getTerrainExaggeration() : 1;
   const pointOffsetMeters = getPointCloudOffsetMeters();
+  const anchorMercator = createPointCloudMercatorAnchor(
+    points,
+    map,
+    useTerrainElevation,
+    verticalExaggeration,
+    pointOffsetMeters,
+  );
 
   points.forEach((point, index) => {
     const hasPointAltitude = Number.isFinite(point.altitudeMeters);
@@ -435,16 +540,82 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
     const color = getLasClassColor(point.classification);
     const offset = index * 7;
 
-    positions[offset] = mercator.x;
-    positions[offset + 1] = mercator.y;
-    positions[offset + 2] = mercator.z;
+    positions[offset] = mercator.x - anchorMercator[0];
+    positions[offset + 1] = mercator.y - anchorMercator[1];
+    positions[offset + 2] = mercator.z - anchorMercator[2];
     positions[offset + 3] = color[0];
     positions[offset + 4] = color[1];
     positions[offset + 5] = color[2];
     positions[offset + 6] = color[3];
   });
 
-  return positions;
+  return {
+    data: positions,
+    anchorMercator,
+  };
+}
+
+function createPointCloudMercatorAnchor(
+  points,
+  map,
+  useTerrainElevation,
+  verticalExaggeration,
+  pointOffsetMeters,
+) {
+  if (!points.length) {
+    return [0, 0, 0];
+  }
+
+  let minLng = Infinity;
+  let maxLng = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  let minElevation = Infinity;
+  let maxElevation = -Infinity;
+
+  points.forEach((point) => {
+    const hasPointAltitude = Number.isFinite(point.altitudeMeters);
+    const elevation = hasPointAltitude
+      ? point.altitudeMeters * verticalExaggeration + pointOffsetMeters
+      : useTerrainElevation
+        ? getTerrainElevation(map, point) * verticalExaggeration +
+          pointOffsetMeters
+        : pointOffsetMeters;
+
+    minLng = Math.min(minLng, point.lng);
+    maxLng = Math.max(maxLng, point.lng);
+    minLat = Math.min(minLat, point.lat);
+    maxLat = Math.max(maxLat, point.lat);
+    minElevation = Math.min(minElevation, elevation);
+    maxElevation = Math.max(maxElevation, elevation);
+  });
+
+  const anchorLng = (minLng + maxLng) / 2;
+  const anchorLat = (minLat + maxLat) / 2;
+  const anchorElevation = (minElevation + maxElevation) / 2;
+  const anchor = maplibregl.MercatorCoordinate.fromLngLat(
+    { lng: anchorLng, lat: anchorLat },
+    anchorElevation,
+  );
+
+  return [anchor.x, anchor.y, anchor.z];
+}
+
+function multiplyMatrixAndMercatorPoint(matrix, anchorMercator = [0, 0, 0]) {
+  if (!matrix) {
+    return new Float32Array([0, 0, 0, 1]);
+  }
+
+  const x = anchorMercator[0] || 0;
+  const y = anchorMercator[1] || 0;
+  const z = anchorMercator[2] || 0;
+
+  return new Float32Array([
+    matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
+    matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
+    matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
+    matrix[3] * x + matrix[7] * y + matrix[11] * z + matrix[15],
+  ]);
 }
 
 function getLasClassColor(classification = 0) {
@@ -469,6 +640,7 @@ function createPointCloudShaders(isWebGl2) {
       vertex: `#version 300 es
         precision highp float;
         uniform mat4 u_matrix;
+        uniform vec4 u_anchor_clip;
         uniform float u_point_size;
         uniform float u_depth_bias;
         in vec3 a_position;
@@ -476,7 +648,7 @@ function createPointCloudShaders(isWebGl2) {
         out vec4 v_color;
 
         void main() {
-          gl_Position = u_matrix * vec4(a_position, 1.0);
+          gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
           gl_Position.z -= u_depth_bias * gl_Position.w;
           gl_PointSize = u_point_size;
           v_color = a_color;
@@ -500,9 +672,10 @@ function createPointCloudShaders(isWebGl2) {
   }
 
   return {
-    vertex: `
+      vertex: `
       precision highp float;
       uniform mat4 u_matrix;
+      uniform vec4 u_anchor_clip;
       uniform float u_point_size;
       uniform float u_depth_bias;
       attribute vec3 a_position;
@@ -510,7 +683,7 @@ function createPointCloudShaders(isWebGl2) {
       varying vec4 v_color;
 
       void main() {
-        gl_Position = u_matrix * vec4(a_position, 1.0);
+        gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
         gl_Position.z -= u_depth_bias * gl_Position.w;
         gl_PointSize = u_point_size;
         v_color = a_color;
@@ -604,6 +777,7 @@ function bindLayerMenu() {
     if (terrainToggle.checked) {
       applyTerrainExaggeration();
       refreshPointCloudElevation();
+      refreshTileBounds();
     }
   });
 
@@ -611,12 +785,21 @@ function bindLayerMenu() {
     const offset = getPointCloudOffsetMeters();
     pointOffsetValue.textContent = `${offset.toFixed(offset % 1 ? 1 : 0)} m`;
     refreshPointCloudElevation();
+    refreshTileBounds();
   });
 
   pointSizeControl.addEventListener("input", () => {
     const size = getPointSizePixels();
     pointSizeValue.textContent = `${size.toFixed(size % 1 ? 1 : 0)} px`;
     window.mapLibreMap?.triggerRepaint();
+  });
+
+  blockDetailsToggle.addEventListener("change", () => {
+    setBlockDetailsVisible(blockDetailsToggle.checked);
+  });
+
+  fullResolutionToggle.addEventListener("change", () => {
+    applyPointCloudTileSelection({ updateStatus: true });
   });
 
   depthBiasControl.addEventListener("input", () => {
@@ -742,6 +925,150 @@ function removeStreetLayer() {
   }
 }
 
+function setBlockDetailsVisible(visible) {
+  const map = window.mapLibreMap;
+
+  if (!map) {
+    return;
+  }
+
+  [layerIds.blockBoundsLayer, layerIds.blockLabelsLayer].forEach((layerId) => {
+    if (map.getLayer(layerId)) {
+      map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+    }
+  });
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
+
+function updateBlockBoundsLayer(blocks) {
+  currentPointCloudTiles = blocks;
+  const source = window.mapLibreMap?.getSource(layerIds.blockBoundsSource);
+
+  if (source?.setData) {
+    source.setData(createBlockBoundsGeoJson(blocks));
+  }
+}
+
+function createBlockBoundsGeoJson(blocks) {
+  const mapCenter = window.mapLibreMap?.getCenter?.();
+
+  return {
+    type: "FeatureCollection",
+    features: blocks
+      .filter((block) => block.corners?.length === 4 && block.pointCount > 0)
+      .map((block) => {
+        const distanceMeters = getTileDistanceMeters(block, mapCenter);
+        const diagonalDistanceRatio = getTileDiagonalDistanceRatio(
+          block,
+          distanceMeters,
+        );
+
+        return {
+          type: "Feature",
+          properties: {
+            id: block.key,
+            pointCount: block.pointCount,
+            detailLabel: formatTileDetailLabel(
+              block,
+              distanceMeters,
+              diagonalDistanceRatio,
+            ),
+          },
+          geometry: {
+            type: "Polygon",
+            coordinates: [[...block.corners, block.corners[0]]],
+          },
+        };
+      }),
+  };
+}
+
+function formatTileDetailLabel(tile, distanceMeters, diagonalDistanceRatio) {
+  return `${getTileTypeLabel(tile)} LOD ${tile.depth || 0} - ${formatDistanceLabel(distanceMeters)} - diag/dist ${formatRatio(diagonalDistanceRatio)}`;
+}
+
+function getTileTypeLabel(tile) {
+  if (!tile.parentId) {
+    return "root";
+  }
+
+  if (tile.childIds?.length) {
+    return "intermediate";
+  }
+
+  return "leaf";
+}
+
+function getTileDiagonalDistanceRatio(tile, distanceMeters) {
+  if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+    return Infinity;
+  }
+
+  return tile.diagonalMeters / distanceMeters;
+}
+
+function formatRatio(ratio) {
+  if (ratio === Infinity) {
+    return "inf";
+  }
+
+  if (!Number.isFinite(ratio)) {
+    return "";
+  }
+
+  return `${ratio.toFixed(ratio < 10 ? 2 : 1)}x`;
+}
+
+function getLngLatDistanceMeters(from, to) {
+  if (!from || !to) {
+    return NaN;
+  }
+
+  const fromLng = Number.isFinite(from.lng) ? from.lng : from[0];
+  const fromLat = Number.isFinite(from.lat) ? from.lat : from[1];
+  const toLng = Number.isFinite(to.lng) ? to.lng : to[0];
+  const toLat = Number.isFinite(to.lat) ? to.lat : to[1];
+
+  if (
+    !Number.isFinite(fromLng) ||
+    !Number.isFinite(fromLat) ||
+    !Number.isFinite(toLng) ||
+    !Number.isFinite(toLat)
+  ) {
+    return NaN;
+  }
+
+  const earthRadius = 6371008.8;
+  const fromPhi = fromLat * (Math.PI / 180);
+  const toPhi = toLat * (Math.PI / 180);
+  const deltaPhi = (toLat - fromLat) * (Math.PI / 180);
+  const deltaLambda = (toLng - fromLng) * (Math.PI / 180);
+  const a =
+    Math.sin(deltaPhi / 2) ** 2 +
+    Math.cos(fromPhi) *
+      Math.cos(toPhi) *
+      Math.sin(deltaLambda / 2) ** 2;
+
+  return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function formatDistanceLabel(distanceMeters) {
+  if (!Number.isFinite(distanceMeters)) {
+    return "";
+  }
+
+  if (distanceMeters < 1000) {
+    return `${Math.round(distanceMeters)} m`;
+  }
+
+  return `${(distanceMeters / 1000).toFixed(distanceMeters < 10000 ? 1 : 0)} km`;
+}
+
 function getSelectedBaseLayer() {
   return (
     Array.from(baseLayerInputs).find((input) => input.checked)?.value ||
@@ -789,6 +1116,7 @@ function setElevationEnabled(enabled, options = {}) {
   }
 
   refreshPointCloudElevation();
+  refreshTileBounds();
   map.once("idle", refreshPointCloudElevation);
 }
 
@@ -815,6 +1143,21 @@ function getPointSizePixels() {
   return Number(pointSizeControl.value) || 3;
 }
 
+function getSelectedLasIndexingMode() {
+  return (
+    Array.from(lasIndexingModeInputs).find((input) => input.checked)?.value ||
+    "quadtree"
+  );
+}
+
+function getLasIndexingModeLabel(mode = getSelectedLasIndexingMode()) {
+  return mode === "m3no" ? "M3NO" : "QuadTree";
+}
+
+function isFullResolutionEnabled() {
+  return fullResolutionToggle?.checked !== false;
+}
+
 function getDepthBias() {
   return Number(depthBiasControl.value) || 0;
 }
@@ -825,10 +1168,600 @@ function refreshPointCloudElevation() {
   }
 }
 
+function refreshTileBounds() {
+  if (currentPointCloudTiles.length && window.mapLibreMap) {
+    updateBlockBoundsLayer(currentPointCloudTiles);
+  }
+}
+
 function getLasFiles(fileList) {
   return Array.from(fileList || []).filter((file) =>
     file.name.toLowerCase().endsWith(".las"),
   );
+}
+
+function resetVolatileTileDb() {
+  if (!("indexedDB" in window)) {
+    volatileTileDbPromise = Promise.resolve(null);
+    return volatileTileDbPromise;
+  }
+
+  volatileTileDbPromise = new Promise((resolve, reject) => {
+    const deleteRequest = indexedDB.deleteDatabase(volatileTileDbConfig.name);
+
+    deleteRequest.onerror = () => reject(deleteRequest.error);
+    deleteRequest.onblocked = () => {
+      console.warn("The volatile tile database reset is blocked by another tab.");
+    };
+    deleteRequest.onsuccess = () => {
+      openVolatileTileDb().then(resolve, reject);
+    };
+  });
+
+  return volatileTileDbPromise;
+}
+
+function openVolatileTileDb() {
+  return new Promise((resolve, reject) => {
+    const openRequest = indexedDB.open(
+      volatileTileDbConfig.name,
+      volatileTileDbConfig.version,
+    );
+
+    openRequest.onerror = () => reject(openRequest.error);
+    openRequest.onupgradeneeded = () => {
+      const db = openRequest.result;
+
+      if (!db.objectStoreNames.contains(volatileTileDbConfig.storeName)) {
+        db.createObjectStore(volatileTileDbConfig.storeName, {
+          keyPath: "id",
+        });
+      }
+    };
+    openRequest.onsuccess = () => resolve(openRequest.result);
+  });
+}
+
+async function getVolatileTileDb() {
+  if (!volatileTileDbPromise) {
+    volatileTileDbPromise = openVolatileTileDb();
+  }
+
+  return volatileTileDbPromise;
+}
+
+async function clearVolatileTileDb() {
+  const db = await getVolatileTileDb();
+
+  if (!db) {
+    return;
+  }
+
+  await runTileStoreTransaction("readwrite", (store) => store.clear());
+}
+
+async function saveTileRecords(tileRecords) {
+  const db = await getVolatileTileDb();
+
+  if (!db || !tileRecords.length) {
+    return;
+  }
+
+  for (
+    let startIndex = 0;
+    startIndex < tileRecords.length;
+    startIndex += pointCloudConfig.indexedDbWriteBatchSize
+  ) {
+    const batch = tileRecords.slice(
+      startIndex,
+      startIndex + pointCloudConfig.indexedDbWriteBatchSize,
+    );
+
+    await runTileStoreTransaction("readwrite", (store) => {
+      batch.forEach((record) => {
+        store.put(record);
+      });
+    });
+    await yieldToBrowser();
+  }
+}
+
+async function getStoredTileRecord(tileKey) {
+  const db = await getVolatileTileDb();
+
+  if (!db) {
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      volatileTileDbConfig.storeName,
+      "readonly",
+    );
+    const store = transaction.objectStore(volatileTileDbConfig.storeName);
+    const request = store.get(tileKey);
+
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getStoredTileRecords(tileIds) {
+  const db = await getVolatileTileDb();
+
+  if (!db || !tileIds.length) {
+    return [];
+  }
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      volatileTileDbConfig.storeName,
+      "readonly",
+    );
+    const store = transaction.objectStore(volatileTileDbConfig.storeName);
+    const records = [];
+    let pending = tileIds.length;
+
+    tileIds.forEach((tileId) => {
+      const request = store.get(tileId);
+
+      request.onsuccess = () => {
+        if (request.result) {
+          records.push(request.result);
+        }
+        pending -= 1;
+        if (pending === 0) {
+          resolve(records);
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
+  });
+}
+
+function runTileStoreTransaction(mode, operation) {
+  return getVolatileTileDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        if (!db) {
+          resolve();
+          return;
+        }
+
+        const transaction = db.transaction(
+          volatileTileDbConfig.storeName,
+          mode,
+        );
+        const store = transaction.objectStore(
+          volatileTileDbConfig.storeName,
+        );
+
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+        operation(store);
+      }),
+  );
+}
+
+window.pointscapeTileDb = {
+  getTile: getStoredTileRecord,
+  getAllTiles: async () => currentTileIndex,
+};
+
+function schedulePointCloudTileRefresh() {
+  if (!currentPointCloudTiles.length) {
+    return;
+  }
+
+  const refreshId = ++pointCloudTileRefreshId;
+
+  window.setTimeout(() => {
+    if (refreshId === pointCloudTileRefreshId) {
+      applyPointCloudTileSelection();
+    }
+  }, 80);
+}
+
+async function applyPointCloudTileSelection(options = {}) {
+  if (!window.pointCloudLayer || !window.mapLibreMap) {
+    return;
+  }
+
+  const refreshId = ++pointCloudTileRefreshId;
+  const activeTileMetadata = selectActiveTiles(
+    currentTileIndex,
+    window.mapLibreMap,
+  );
+  const activeTileIds = activeTileMetadata.map((tile) => tile.id);
+
+  if (refreshId !== pointCloudTileRefreshId) {
+    return;
+  }
+
+  if (!activeTileIds.length) {
+    currentPointCloudPoints = [];
+    window.pointCloudLayer.setPoints([], window.mapLibreMap);
+    updateBlockBoundsLayer([]);
+
+    if (options.updateStatus !== false) {
+      updatePointCloudStatus(0, 0, 0);
+    }
+    return;
+  }
+
+  const activeTiles = await getStoredTileRecords(activeTileIds);
+
+  if (refreshId !== pointCloudTileRefreshId) {
+    return;
+  }
+
+  const activeTilesById = new Map(activeTiles.map((tile) => [tile.id, tile]));
+  const points = [];
+  let availablePointCount = 0;
+
+  activeTileMetadata.forEach((metadata) => {
+    const record = activeTilesById.get(metadata.id) || metadata;
+    const tilePoints = getRenderableTilePoints(record);
+
+    availablePointCount +=
+      record.sourcePointCount ||
+      record.originalPointCount ||
+      record.fullPointCount ||
+      tilePoints.length;
+    points.push(...tilePoints);
+  });
+
+  currentPointCloudPoints = points;
+  window.pointCloudLayer.setPoints(points, window.mapLibreMap);
+  updateBlockBoundsLayer(activeTileMetadata);
+
+  if (options.updateStatus !== false) {
+    updatePointCloudStatus(
+      points.length,
+      availablePointCount,
+      activeTileMetadata.length,
+    );
+  }
+}
+
+function getRenderableTilePoints(record) {
+  if (
+    isFullResolutionEnabled() &&
+    isFullResolutionTile(record) &&
+    record.fullPoints?.length
+  ) {
+    return record.fullPoints;
+  }
+
+  return record.points || [];
+}
+
+function isFullResolutionTile(record) {
+  return !record.childIds?.length;
+}
+
+function selectActiveTiles(records, map) {
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const rootTiles = records
+    .filter((record) => !record.parentId)
+    .sort((left, right) => left.fileIndex - right.fileIndex);
+  const activeTiles = [];
+  const nextExpandedTileIds = new Set();
+  const mapCenter = map?.getCenter?.();
+  const useAccumulatedLod = currentPointCloudSummary?.indexingMode === "m3no";
+
+  rootTiles.forEach((tile) => {
+    collectActiveTiles(
+      tile,
+      recordsById,
+      map,
+      mapCenter,
+      useAccumulatedLod,
+      activeTiles,
+      nextExpandedTileIds,
+    );
+  });
+
+  currentExpandedTileIds = nextExpandedTileIds;
+  currentActiveTileIds = new Set(activeTiles.map((tile) => tile.id));
+
+  return activeTiles;
+}
+
+function collectActiveTiles(
+  tile,
+  recordsById,
+  map,
+  mapCenter,
+  useAccumulatedLod,
+  activeTiles,
+  nextExpandedTileIds,
+) {
+  if (useAccumulatedLod) {
+    activeTiles.push(tile);
+  }
+
+  const childTiles = (tile.childIds || [])
+    .map((childId) => recordsById.get(childId))
+    .filter(Boolean);
+
+  if (!childTiles.length) {
+    if (!useAccumulatedLod) {
+      activeTiles.push(tile);
+    }
+    return;
+  }
+
+  const shouldExpand = shouldExpandTile(tile, map, mapCenter);
+
+  if (!shouldExpand) {
+    if (!useAccumulatedLod) {
+      activeTiles.push(tile);
+    }
+    return;
+  }
+
+  nextExpandedTileIds.add(tile.id);
+  const activeTileCountBeforeChildren = activeTiles.length;
+  childTiles.forEach((childTile) => {
+    collectActiveTiles(
+      childTile,
+      recordsById,
+      map,
+      mapCenter,
+      useAccumulatedLod,
+      activeTiles,
+      nextExpandedTileIds,
+    );
+  });
+
+  if (!useAccumulatedLod && activeTiles.length === activeTileCountBeforeChildren) {
+    activeTiles.push(tile);
+  }
+}
+
+function shouldExpandTile(tile, map, mapCenter) {
+  const wasExpanded = currentExpandedTileIds.has(tile.id);
+  const metersPerPixel = getApproxMetersPerPixel(map, mapCenter);
+  const screenDiagonal =
+    Number.isFinite(metersPerPixel) && metersPerPixel > 0
+      ? tile.diagonalMeters / metersPerPixel
+      : 0;
+  const screenThreshold =
+    pointCloudConfig.fullResolutionScreenDiagonalPixels *
+    (wasExpanded ? 1 - pointCloudConfig.tileCollapseHysteresisRatio : 1);
+
+  if (screenDiagonal >= screenThreshold) {
+    return true;
+  }
+
+  const distanceMeters = getTileDistanceMeters(tile, mapCenter);
+  const expandDistance = tile.diagonalMeters;
+  const collapseDistance =
+    tile.diagonalMeters * (1 + pointCloudConfig.tileCollapseHysteresisRatio);
+
+  return wasExpanded
+    ? distanceMeters <= collapseDistance
+    : distanceMeters < expandDistance;
+}
+
+function isTileVisibleInMap(tile, map) {
+  const visibleBounds = getMapMetricBoundsForTile(map, tile);
+
+  if (!visibleBounds) {
+    return true;
+  }
+
+  return boundsIntersect(tile.bounds, visibleBounds);
+}
+
+function getMapMetricBoundsForTile(map, tile) {
+  const bounds = map?.getBounds?.();
+
+  if (!bounds) {
+    return null;
+  }
+
+  const corners = [
+    [bounds.getWest(), bounds.getSouth()],
+    [bounds.getWest(), bounds.getNorth()],
+    [bounds.getEast(), bounds.getSouth()],
+    [bounds.getEast(), bounds.getNorth()],
+  ];
+  const points = corners
+    .map(([lng, lat]) => projectLngLatToTileMetric(lng, lat, tile))
+    .filter(Boolean);
+
+  if (!points.length) {
+    return null;
+  }
+
+  return points.reduce(
+    (accumulator, point) => ({
+      minX: Math.min(accumulator.minX, point.x),
+      minY: Math.min(accumulator.minY, point.y),
+      maxX: Math.max(accumulator.maxX, point.x),
+      maxY: Math.max(accumulator.maxY, point.y),
+    }),
+    {
+      minX: Infinity,
+      minY: Infinity,
+      maxX: -Infinity,
+      maxY: -Infinity,
+    },
+  );
+}
+
+function projectLngLatToTileMetric(lng, lat, tile) {
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return null;
+  }
+
+  const crs = currentTileCrsByFile.get(tile.fileIndex) || {
+    kind: tile.crsKind,
+    code: tile.crsCode,
+    zone: tile.crsZone,
+    northern: tile.crsNorthern,
+  };
+
+  if (crs.kind === "geographic" || crs.kind === "web-mercator") {
+    return lngLatToWebMercatorMeters(lng, lat);
+  }
+
+  if (crs.kind === "utm" && crs.zone) {
+    return lngLatToUtm(lng, lat, crs.zone, crs.northern !== false);
+  }
+
+  if (crs.kind === "proj4" && crs.transformer?.inverse) {
+    const [x, y] = crs.transformer.inverse([lng, lat]);
+    return { x, y };
+  }
+
+  return lngLatToWebMercatorMeters(lng, lat);
+}
+
+function boundsIntersect(left, right) {
+  return (
+    left.minX <= right.maxX &&
+    left.maxX >= right.minX &&
+    left.minY <= right.maxY &&
+    left.maxY >= right.minY
+  );
+}
+
+function getTileDistanceMeters(tile, mapCenter) {
+  const metricCenter = projectMapCenterToTileMetric(mapCenter, tile);
+
+  if (!metricCenter) {
+    return Infinity;
+  }
+
+  const horizontalDistanceMeters = getPointToBoundsDistanceMeters(
+    metricCenter,
+    tile.bounds,
+  );
+  const verticalDistanceMeters = getCameraToTileVerticalDistanceMeters(
+    mapCenter,
+    tile,
+  );
+
+  return Math.hypot(horizontalDistanceMeters, verticalDistanceMeters);
+}
+
+function projectMapCenterToTileMetric(mapCenter, tile) {
+  if (!mapCenter) {
+    return null;
+  }
+
+  const lng = Number.isFinite(mapCenter.lng) ? mapCenter.lng : mapCenter[0];
+  const lat = Number.isFinite(mapCenter.lat) ? mapCenter.lat : mapCenter[1];
+
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return null;
+  }
+
+  const crs = currentTileCrsByFile.get(tile.fileIndex) || {
+    kind: tile.crsKind,
+    code: tile.crsCode,
+    zone: tile.crsZone,
+    northern: tile.crsNorthern,
+  };
+
+  if (crs.kind === "geographic" || crs.kind === "web-mercator") {
+    return lngLatToWebMercatorMeters(lng, lat);
+  }
+
+  if (crs.kind === "utm" && crs.zone) {
+    return lngLatToUtm(lng, lat, crs.zone, crs.northern !== false);
+  }
+
+  if (crs.kind === "proj4" && crs.transformer?.inverse) {
+    const [x, y] = crs.transformer.inverse([lng, lat]);
+    return { x, y };
+  }
+
+  return lngLatToWebMercatorMeters(lng, lat);
+}
+
+function getPointToBoundsDistanceMeters(point, bounds) {
+  const dx =
+    point.x < bounds.minX
+      ? bounds.minX - point.x
+      : point.x > bounds.maxX
+        ? point.x - bounds.maxX
+        : 0;
+  const dy =
+    point.y < bounds.minY
+      ? bounds.minY - point.y
+      : point.y > bounds.maxY
+        ? point.y - bounds.maxY
+        : 0;
+
+  return Math.hypot(dx, dy);
+}
+
+function getCameraToTileVerticalDistanceMeters(mapCenter, tile) {
+  const cameraAltitudeMeters = getApproxCameraAltitudeMeters(mapCenter);
+  const minZ = Number.isFinite(tile.minZ) ? tile.minZ : 0;
+  const maxZ = Number.isFinite(tile.maxZ) ? tile.maxZ : minZ;
+
+  if (cameraAltitudeMeters < minZ) {
+    return minZ - cameraAltitudeMeters;
+  }
+
+  if (cameraAltitudeMeters > maxZ) {
+    return cameraAltitudeMeters - maxZ;
+  }
+
+  return 0;
+}
+
+function getApproxCameraAltitudeMeters(mapCenter) {
+  if (!window.mapLibreMap || !mapCenter) {
+    return 0;
+  }
+
+  const lat = Number.isFinite(mapCenter.lat) ? mapCenter.lat : mapCenter[1];
+  const pitch = window.mapLibreMap.getPitch?.() ?? 0;
+  const viewportHeight = Math.max(
+    window.mapLibreMap.getContainer?.()?.clientHeight || window.innerHeight || 900,
+    1,
+  );
+  const metersPerPixel = getApproxMetersPerPixel(window.mapLibreMap, mapCenter);
+  const fovRadians = 36.87 * (Math.PI / 180);
+  const pitchRadians = pitch * (Math.PI / 180);
+  const pitchExpansion = 1 / Math.max(Math.cos(pitchRadians), 0.28);
+  const visibleMeters = metersPerPixel * viewportHeight;
+
+  return visibleMeters / (2 * Math.tan(fovRadians / 2) * pitchExpansion);
+}
+
+function getApproxMetersPerPixel(map, mapCenter) {
+  if (!map || !mapCenter) {
+    return Infinity;
+  }
+
+  const lat = Number.isFinite(mapCenter.lat) ? mapCenter.lat : mapCenter[1];
+  const zoom = map.getZoom?.() ?? 0;
+  const earthCircumference = 40075016.68557849;
+  const latitudeScale = Math.max(Math.cos((lat * Math.PI) / 180), 0.01);
+
+  return (earthCircumference * latitudeScale) / (512 * 2 ** zoom);
+}
+
+function updatePointCloudStatus(renderedPointCount, availablePointCount, activeTileCount) {
+  if (!currentPointCloudSummary) {
+    return;
+  }
+
+  const {
+    fileCount,
+    tileCount,
+    crsSummary,
+    indexingModeLabel = "QuadTree",
+  } = currentPointCloudSummary;
+  lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${renderedPointCount.toLocaleString("en-US")} sampled points rendered from ${availablePointCount.toLocaleString("en-US")} source points - ${crsSummary}`;
 }
 
 async function loadLasFiles(files) {
@@ -839,79 +1772,54 @@ async function loadLasFiles(files) {
 
   const fileLabel =
     files.length === 1 ? files[0].name : `${files.length} LAS files`;
-  lasStatus.textContent = `Preparing ${fileLabel}...`;
+  const indexingMode = getSelectedLasIndexingMode();
+  const indexingModeLabel = getLasIndexingModeLabel(indexingMode);
+  lasStatus.textContent = `Preparing ${fileLabel} with ${indexingModeLabel}...`;
 
   try {
-    const metadata = await Promise.all(
-      files.map(async (file) => {
-        const headerBuffer = await file.slice(0, 375).arrayBuffer();
-        const view = new DataView(headerBuffer);
+    await clearVolatileTileDb();
+    currentPointCloudSummary = null;
+    currentPointCloudPoints = [];
+    currentPointCloudFlyToPoints = [];
+    currentPointCloudTiles = [];
+    currentActiveTileIds = new Set();
+    currentExpandedTileIds = new Set();
+    currentTileIndex = [];
+    currentTileCrsByFile = new Map();
+    window.pointCloudLayer.setPoints([], window.mapLibreMap);
+    updateBlockBoundsLayer([]);
+    const allPoints = [];
+    const allTiles = [];
+    const crsLabels = [];
+    const crsEntries = [];
 
-        if (view.byteLength < 227 || readAscii(view, 0, 4) !== "LASF") {
-          throw new Error(`${file.name} does not appear to be a valid LAS file.`);
-        }
-
-        return {
-          file,
-          pointCount: readLasHeader(view).pointCount,
-        };
-      }),
-    );
-    const globalClassCounts = new Map();
-
-    for (let index = 0; index < metadata.length; index += 1) {
-      const { file } = metadata[index];
-      lasStatus.textContent = `Analyzing classifications in ${file.name} (${index + 1}/${files.length})...`;
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length})...`;
       const buffer = await file.arrayBuffer();
-      const classCounts = countLasClassifications(buffer);
-      metadata[index].classCounts = classCounts;
-
-      classCounts.forEach((count, classification) => {
-        globalClassCounts.set(
-          classification,
-          (globalClassCounts.get(classification) || 0) + count,
-        );
+      const result = await parseLasPointCloud(buffer, {
+        fileIndex: index,
+        fileName: file.name,
+        indexingMode,
+        onProgress: (processed, total) => {
+          const percent = Math.round((processed / total) * 100);
+          lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}%...`;
+        },
       });
+
+      lasStatus.textContent = `Saving ${result.tileRecords.length.toLocaleString("en-US")} ${indexingModeLabel} tiles from ${file.name}...`;
+      await saveTileRecords(result.tileRecords);
+      allPoints.push(...result.points);
+      allTiles.push(...result.tiles);
+      crsLabels.push(result.crsLabel);
+      crsEntries.push([result.fileIndex, result.crs]);
+      await yieldToBrowser();
     }
 
-    const globalClassBudgets = allocateRareClassBudgets(
-      globalClassCounts,
-      pointCloudConfig.maxLasPoints,
-    );
-    const fileClassBudgets = metadata.map(() => new Map());
-
-    globalClassBudgets.forEach((classBudget, classification) => {
-      const allocations = allocateProportionalBudgets(
-        metadata.map(
-          ({ classCounts }) => classCounts.get(classification) || 0,
-        ),
-        classBudget,
-      );
-
-      allocations.forEach((allocation, fileIndex) => {
-        if (allocation > 0) {
-          fileClassBudgets[fileIndex].set(classification, allocation);
-        }
-      });
-    });
-
-    const results = [];
-
-    for (let index = 0; index < metadata.length; index += 1) {
-      const { file } = metadata[index];
-      lasStatus.textContent = `Reading ${file.name} (${index + 1}/${files.length})...`;
-      const buffer = await file.arrayBuffer();
-      results.push(
-        await parseLasPointCloud(buffer, {
-          classCounts: metadata[index].classCounts,
-          classTargets: fileClassBudgets[index],
-        }),
-      );
-    }
-
-    const points = results.flatMap((result) => result.points);
-    window.pointCloudLayer.setPoints(points, window.mapLibreMap);
-    currentPointCloudPoints = points;
+    currentTileIndex = allTiles;
+    currentTileCrsByFile = new Map(crsEntries);
+    updateBlockBoundsLayer(allTiles.filter((tile) => !tile.parentId));
+    currentPointCloudFlyToPoints = allPoints;
     flyToPointCloudButton.hidden = false;
 
     if (!terrainToggle.checked) {
@@ -922,12 +1830,19 @@ async function loadLasFiles(files) {
     }
 
     flyToCurrentPointCloud();
-    const crsLabels = [...new Set(results.map((result) => result.crsLabel))];
+    const uniqueCrsLabels = [...new Set(crsLabels)];
     const crsSummary =
-      crsLabels.length === 1
-        ? crsLabels[0]
-        : `${crsLabels.length} coordinate systems`;
-    lasStatus.textContent = `${files.length} ${files.length === 1 ? "file" : "files"} - ${points.length.toLocaleString("en-US")} LAS points - ${crsSummary}`;
+      uniqueCrsLabels.length === 1
+        ? uniqueCrsLabels[0]
+        : `${uniqueCrsLabels.length} coordinate systems`;
+    currentPointCloudSummary = {
+      fileCount: files.length,
+      tileCount: allTiles.length,
+      crsSummary,
+      indexingMode,
+      indexingModeLabel,
+    };
+    await applyPointCloudTileSelection({ updateStatus: true });
   } catch (error) {
     console.error(error);
     lasStatus.textContent =
@@ -1007,38 +1922,12 @@ function allocateRareClassBudgets(classCounts, maximumPoints) {
   return budgets;
 }
 
-function allocateProportionalBudgets(counts, maximumPoints) {
-  const totalPoints = counts.reduce((sum, count) => sum + count, 0);
-  const budgetLimit = Math.min(maximumPoints, totalPoints);
-
-  if (totalPoints <= budgetLimit) {
-    return [...counts];
-  }
-
-  const exactBudgets = counts.map(
-    (count) => (count / totalPoints) * budgetLimit,
-  );
-  const budgets = exactBudgets.map((budget) => Math.floor(budget));
-  const assigned = budgets.reduce((sum, count) => sum + count, 0);
-  const remaining = budgetLimit - assigned;
-
-  exactBudgets
-    .map((budget, index) => ({
-      index,
-      remainder: budget - Math.floor(budget),
-    }))
-    .filter(({ index }) => budgets[index] < counts[index])
-    .sort((left, right) => right.remainder - left.remainder)
-    .slice(0, remaining)
-    .forEach(({ index }) => {
-      budgets[index] += 1;
-    });
-
-  return budgets;
-}
-
 function flyToCurrentPointCloud() {
-  flyToLasPoints(currentPointCloudPoints);
+  flyToLasPoints(
+    currentPointCloudFlyToPoints.length
+      ? currentPointCloudFlyToPoints
+      : currentPointCloudPoints,
+  );
 }
 
 function flyToLasPoints(points) {
@@ -1147,6 +2036,14 @@ function getPointCloudCenter(points) {
 }
 
 async function parseLasPointCloud(buffer, options = {}) {
+  if (options.indexingMode === "m3no") {
+    return parseLasPointCloudM3no(buffer, options);
+  }
+
+  return parseLasPointCloudQuadtree(buffer, options);
+}
+
+async function parseLasPointCloudQuadtree(buffer, options = {}) {
   const view = new DataView(buffer);
 
   if (readAscii(view, 0, 4) !== "LASF") {
@@ -1160,22 +2057,19 @@ async function parseLasPointCloud(buffer, options = {}) {
 
   const crs = await detectLasCrs(view, header);
   const totalPoints = header.pointCount;
-  const classCounts =
-    options.classCounts || countLasClassifications(buffer, header);
-  const classTargets =
-    options.classTargets ||
-    allocateRareClassBudgets(classCounts, pointCloudConfig.maxLasPoints);
-  const samplingStates = new Map(
-    [...classCounts.entries()].map(([classification, count]) => [
-      classification,
-      {
-        accumulator: 0,
-        count,
-        target: classTargets.get(classification) || 0,
-      },
-    ]),
-  );
-  const points = [];
+  const fileIndex = options.fileIndex || 0;
+  const rootBounds = getLasMetricBounds(header, crs);
+  const maxDepth = getQuadtreeMaxDepth(rootBounds);
+  const tileStates = new Map();
+  const rootTile = createTileState({
+    id: `${fileIndex}:r`,
+    parentId: null,
+    fileIndex,
+    depth: 0,
+    bounds: rootBounds,
+    crs,
+  });
+  tileStates.set(rootTile.id, rootTile);
 
   for (let pointIndex = 0; pointIndex < totalPoints; pointIndex += 1) {
     const offset = header.pointDataOffset + pointIndex * header.pointRecordLength;
@@ -1185,18 +2079,6 @@ async function parseLasPointCloud(buffer, options = {}) {
     }
 
     const classification = readLasClassification(view, offset, header.pointFormat);
-    const samplingState = samplingStates.get(classification);
-
-    if (!samplingState || samplingState.target === 0) {
-      continue;
-    }
-
-    samplingState.accumulator += samplingState.target;
-    if (samplingState.accumulator < samplingState.count) {
-      continue;
-    }
-    samplingState.accumulator -= samplingState.count;
-
     const x = view.getInt32(offset, true) * header.scaleX + header.offsetX;
     const y = view.getInt32(offset + 4, true) * header.scaleY + header.offsetY;
     const z = view.getInt32(offset + 8, true) * header.scaleZ + header.offsetZ;
@@ -1208,18 +2090,737 @@ async function parseLasPointCloud(buffer, options = {}) {
       Math.abs(projected.lng) <= 180 &&
       Math.abs(projected.lat) <= 90
     ) {
-      projected.classification = classification;
-      points.push(projected);
+      const metric = getHorizontalMetricCoordinate(x, y, crs);
+      const point = {
+        lng: projected.lng,
+        lat: projected.lat,
+        altitudeMeters: projected.altitudeMeters,
+        classification,
+      };
+
+      insertPointIntoTileTree(
+        tileStates,
+        rootTile,
+        metric,
+        point,
+        z,
+        maxDepth,
+        crs,
+      );
+    }
+
+    if (
+      pointIndex > 0 &&
+      pointIndex % pointCloudConfig.parseYieldEveryPoints === 0
+    ) {
+      options.onProgress?.(pointIndex, totalPoints);
+      await yieldToBrowser();
     }
   }
+  options.onProgress?.(totalPoints, totalPoints);
 
-  if (!points.length) {
+  if (!rootTile.originalPointCount) {
     throw new Error("No valid points could be projected from the LAS file.");
   }
 
+  const tileRecords = await createTileRecordsAsync(
+    tileStates,
+    options.fileName || "",
+    crs,
+  );
+
   return {
-    points,
+    fileIndex,
+    crs,
+    points: rootTile.points,
+    tiles: tileRecords.map(createTileMetadataRecord),
+    tileRecords,
     crsLabel: crs.label,
+  };
+}
+
+async function parseLasPointCloudM3no(buffer, options = {}) {
+  const view = new DataView(buffer);
+
+  if (readAscii(view, 0, 4) !== "LASF") {
+    throw new Error("The file does not appear to be a valid LAS file.");
+  }
+
+  const header = readLasHeader(view);
+  if (header.pointFormat > 10) {
+    throw new Error("This app supports uncompressed LAS files. LAZ requires an additional decoder.");
+  }
+
+  const crs = await detectLasCrs(view, header);
+  const totalPoints = header.pointCount;
+  const fileIndex = options.fileIndex || 0;
+  const rootBounds = getM3noMetricBounds(header, crs);
+  const maxDepth = getQuadtreeMaxDepth(rootBounds);
+  const tileStates = new Map();
+  const rootTile = createM3noTileState({
+    id: `${fileIndex}:m3no`,
+    parentId: null,
+    fileIndex,
+    depth: 0,
+    bounds: rootBounds,
+    crs,
+  });
+  tileStates.set(rootTile.id, rootTile);
+
+  for (let pointIndex = 0; pointIndex < totalPoints; pointIndex += 1) {
+    const offset = header.pointDataOffset + pointIndex * header.pointRecordLength;
+
+    if (offset + 12 > view.byteLength) {
+      break;
+    }
+
+    const classification = readLasClassification(view, offset, header.pointFormat);
+    const x = view.getInt32(offset, true) * header.scaleX + header.offsetX;
+    const y = view.getInt32(offset + 4, true) * header.scaleY + header.offsetY;
+    const z = view.getInt32(offset + 8, true) * header.scaleZ + header.offsetZ;
+    const projected = projectLasCoordinate(x, y, z, crs);
+
+    if (
+      Number.isFinite(projected.lng) &&
+      Number.isFinite(projected.lat) &&
+      Math.abs(projected.lng) <= 180 &&
+      Math.abs(projected.lat) <= 90
+    ) {
+      const metric = getHorizontalMetricCoordinate(x, y, crs);
+      const point = {
+        lng: projected.lng,
+        lat: projected.lat,
+        altitudeMeters: projected.altitudeMeters,
+        classification,
+      };
+
+      insertPointIntoM3noTree(
+        tileStates,
+        rootTile,
+        {
+          metric,
+          altitudeMeters: z,
+          point,
+        },
+        maxDepth,
+        crs,
+      );
+      insertPointIntoM3noFullResolutionTree(
+        tileStates,
+        rootTile,
+        metric,
+        point,
+        z,
+        maxDepth,
+        crs,
+      );
+    }
+
+    if (
+      pointIndex > 0 &&
+      pointIndex % pointCloudConfig.parseYieldEveryPoints === 0
+    ) {
+      options.onProgress?.(pointIndex, totalPoints);
+      await yieldToBrowser();
+    }
+  }
+  options.onProgress?.(totalPoints, totalPoints);
+
+  if (!rootTile.originalPointCount) {
+    throw new Error("No valid points could be projected from the LAS file.");
+  }
+
+  finalizeM3noTileSamples(tileStates);
+  const tileRecords = await createTileRecordsAsync(
+    tileStates,
+    options.fileName || "",
+    crs,
+  );
+
+  return {
+    fileIndex,
+    crs,
+    points: rootTile.points,
+    tiles: tileRecords.map(createTileMetadataRecord),
+    tileRecords,
+    crsLabel: crs.label,
+  };
+}
+
+function getLasMetricBounds(header, crs) {
+  if (crs.kind === "geographic") {
+    const southwest = lngLatToWebMercatorMeters(header.minX, header.minY);
+    const northeast = lngLatToWebMercatorMeters(header.maxX, header.maxY);
+
+    return normalizeTileBounds({
+      minX: southwest.x,
+      minY: southwest.y,
+      maxX: northeast.x,
+      maxY: northeast.y,
+    });
+  }
+
+  return normalizeTileBounds({
+    minX: header.minX,
+    minY: header.minY,
+    maxX: header.maxX,
+    maxY: header.maxY,
+  });
+}
+
+function getM3noMetricBounds(header, crs) {
+  const horizontalBounds = getLasMetricBounds(header, crs);
+  const minZ = Math.min(header.minZ, header.maxZ);
+  const maxZ = Math.max(header.minZ, header.maxZ);
+  const epsilon = 0.01;
+
+  return {
+    ...horizontalBounds,
+    minZ: minZ === maxZ ? minZ - epsilon : minZ,
+    maxZ: minZ === maxZ ? maxZ + epsilon : maxZ,
+  };
+}
+
+function normalizeTileBounds(bounds) {
+  const minX = Math.min(bounds.minX, bounds.maxX);
+  const maxX = Math.max(bounds.minX, bounds.maxX);
+  const minY = Math.min(bounds.minY, bounds.maxY);
+  const maxY = Math.max(bounds.minY, bounds.maxY);
+  const epsilon = 0.01;
+
+  return {
+    minX: minX === maxX ? minX - epsilon : minX,
+    minY: minY === maxY ? minY - epsilon : minY,
+    maxX: minX === maxX ? maxX + epsilon : maxX,
+    maxY: minY === maxY ? maxY + epsilon : maxY,
+  };
+}
+
+function getQuadtreeMaxDepth(rootBounds) {
+  const diagonal = getBoundsDiagonalMeters(rootBounds);
+  let depth = 0;
+
+  while (
+    depth < pointCloudConfig.tileMaxDepth &&
+    diagonal / 2 ** depth > pointCloudConfig.tileMinDiagonalMeters
+  ) {
+    depth += 1;
+  }
+
+  return depth;
+}
+
+function createTileState({ id, parentId, fileIndex, depth, bounds, crs }) {
+  return {
+    id,
+    key: id,
+    parentId,
+    fileIndex,
+    depth,
+    bounds,
+    diagonalMeters: getBoundsDiagonalMeters(bounds),
+    originalPointCount: 0,
+    fullPointCount: 0,
+    pointCount: 0,
+    minZ: Infinity,
+    maxZ: -Infinity,
+    points: [],
+    fullPoints: [],
+    childIds: [],
+    center: createTileCenter(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY, crs),
+    corners: createTileCorners(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY, crs),
+  };
+}
+
+function createM3noTileState(options) {
+  const tile = createTileState(options);
+
+  return {
+    ...tile,
+    cellSamples: new Map(),
+    attributeIndexes: {
+      altitude: { min: Infinity, max: -Infinity },
+      classificationBins: new Set(),
+    },
+  };
+}
+
+function insertPointIntoTileTree(
+  tileStates,
+  rootTile,
+  metric,
+  point,
+  altitudeMeters,
+  maxDepth,
+  crs,
+) {
+  let tile = rootTile;
+
+  while (tile) {
+    addPointToTileSample(tile, point, altitudeMeters);
+
+    if (
+      tile.depth >= maxDepth ||
+      tile.diagonalMeters <= pointCloudConfig.tileMinDiagonalMeters
+    ) {
+      addPointToTileFullResolution(tile, point, altitudeMeters);
+      return;
+    }
+
+    const quadrant = getTileQuadrant(metric, tile.bounds);
+    const childId = `${tile.id}.${quadrant}`;
+    let childTile = tileStates.get(childId);
+
+    if (!childTile) {
+      childTile = createTileState({
+        id: childId,
+        parentId: tile.id,
+        fileIndex: tile.fileIndex,
+        depth: tile.depth + 1,
+        bounds: getTileChildBounds(tile.bounds, quadrant),
+        crs,
+      });
+      tileStates.set(childId, childTile);
+      tile.childIds.push(childId);
+    }
+
+    tile = childTile;
+  }
+}
+
+function insertPointIntoM3noTree(
+  tileStates,
+  rootTile,
+  sample,
+  maxDepth,
+  crs,
+) {
+  let tile = rootTile;
+  let pendingSample = sample;
+
+  while (tile && pendingSample) {
+    addPointToM3noSubtreeIndex(tile, pendingSample);
+    pendingSample = addPointToM3noNodeSample(tile, pendingSample);
+
+    if (!pendingSample) {
+      return;
+    }
+
+    if (
+      tile.depth >= maxDepth ||
+      tile.diagonalMeters <= pointCloudConfig.tileMinDiagonalMeters
+    ) {
+      return;
+    }
+
+    const childIndex = getM3noChildIndex(
+      pendingSample.metric,
+      pendingSample.altitudeMeters,
+      tile.bounds,
+    );
+    const childId = `${tile.id}.${childIndex}`;
+    let childTile = tileStates.get(childId);
+
+    if (!childTile) {
+      childTile = createM3noTileState({
+        id: childId,
+        parentId: tile.id,
+        fileIndex: tile.fileIndex,
+        depth: tile.depth + 1,
+        bounds: getM3noChildBounds(tile.bounds, childIndex),
+        crs,
+      });
+      tileStates.set(childId, childTile);
+      tile.childIds.push(childId);
+    }
+
+    tile = childTile;
+  }
+}
+
+function addPointToM3noSubtreeIndex(tile, sample) {
+  tile.originalPointCount += 1;
+  tile.pointCount = tile.originalPointCount;
+  tile.minZ = Math.min(tile.minZ, sample.altitudeMeters);
+  tile.maxZ = Math.max(tile.maxZ, sample.altitudeMeters);
+  tile.attributeIndexes.altitude.min = Math.min(
+    tile.attributeIndexes.altitude.min,
+    sample.altitudeMeters,
+  );
+  tile.attributeIndexes.altitude.max = Math.max(
+    tile.attributeIndexes.altitude.max,
+    sample.altitudeMeters,
+  );
+  tile.attributeIndexes.classificationBins.add(sample.point.classification);
+}
+
+function addPointToM3noNodeSample(tile, sample) {
+  const key = getM3noCellKey(sample, tile.bounds);
+  const distanceSq = getM3noCellCenterDistanceSq(sample, tile.bounds);
+  const existing = tile.cellSamples.get(key);
+  const nextSample = { ...sample, distanceSq };
+
+  if (!existing) {
+    tile.cellSamples.set(key, nextSample);
+    return null;
+  }
+
+  if (distanceSq < existing.distanceSq) {
+    tile.cellSamples.set(key, nextSample);
+    return existing;
+  }
+
+  return nextSample;
+}
+
+function getM3noCellKey(sample, bounds) {
+  const gridSize = pointCloudConfig.m3noGridCellsPerAxis;
+  const x = getM3noCellIndex(sample.metric.x, bounds.minX, bounds.maxX, gridSize);
+  const y = getM3noCellIndex(sample.metric.y, bounds.minY, bounds.maxY, gridSize);
+  const z = getM3noCellIndex(
+    sample.altitudeMeters,
+    bounds.minZ,
+    bounds.maxZ,
+    gridSize,
+  );
+
+  return `${x}:${y}:${z}`;
+}
+
+function getM3noCellIndex(value, minValue, maxValue, gridSize) {
+  const span = Math.max(maxValue - minValue, Number.EPSILON);
+  const normalized = (value - minValue) / span;
+  return Math.max(
+    0,
+    Math.min(gridSize - 1, Math.floor(normalized * gridSize)),
+  );
+}
+
+function getM3noCellCenterDistanceSq(sample, bounds) {
+  const gridSize = pointCloudConfig.m3noGridCellsPerAxis;
+  const x = getM3noCellCenterCoordinate(
+    sample.metric.x,
+    bounds.minX,
+    bounds.maxX,
+    gridSize,
+  );
+  const y = getM3noCellCenterCoordinate(
+    sample.metric.y,
+    bounds.minY,
+    bounds.maxY,
+    gridSize,
+  );
+  const z = getM3noCellCenterCoordinate(
+    sample.altitudeMeters,
+    bounds.minZ,
+    bounds.maxZ,
+    gridSize,
+  );
+
+  return (
+    (sample.metric.x - x) ** 2 +
+    (sample.metric.y - y) ** 2 +
+    (sample.altitudeMeters - z) ** 2
+  );
+}
+
+function getM3noCellCenterCoordinate(value, minValue, maxValue, gridSize) {
+  const cellIndex = getM3noCellIndex(value, minValue, maxValue, gridSize);
+  return minValue + ((cellIndex + 0.5) * (maxValue - minValue)) / gridSize;
+}
+
+function getM3noChildIndex(metric, altitudeMeters, bounds) {
+  const middleX = (bounds.minX + bounds.maxX) / 2;
+  const middleY = (bounds.minY + bounds.maxY) / 2;
+  const middleZ = (bounds.minZ + bounds.maxZ) / 2;
+  const east = metric.x >= middleX ? 1 : 0;
+  const north = metric.y >= middleY ? 2 : 0;
+  const upper = altitudeMeters >= middleZ ? 4 : 0;
+
+  return east + north + upper;
+}
+
+function getM3noChildBounds(bounds, childIndex) {
+  const middleX = (bounds.minX + bounds.maxX) / 2;
+  const middleY = (bounds.minY + bounds.maxY) / 2;
+  const middleZ = (bounds.minZ + bounds.maxZ) / 2;
+  const east = childIndex % 2 === 1;
+  const north = childIndex % 4 >= 2;
+  const upper = childIndex >= 4;
+
+  return {
+    minX: east ? middleX : bounds.minX,
+    maxX: east ? bounds.maxX : middleX,
+    minY: north ? middleY : bounds.minY,
+    maxY: north ? bounds.maxY : middleY,
+    minZ: upper ? middleZ : bounds.minZ,
+    maxZ: upper ? bounds.maxZ : middleZ,
+  };
+}
+
+function finalizeM3noTileSamples(tileStates) {
+  tileStates.forEach((tile) => {
+    if (!tile.cellSamples) {
+      return;
+    }
+
+    tile.points = Array.from(tile.cellSamples.values(), (sample) => sample.point);
+  });
+}
+
+function insertPointIntoM3noFullResolutionTree(
+  tileStates,
+  rootTile,
+  metric,
+  point,
+  altitudeMeters,
+  maxDepth,
+  crs,
+) {
+  let tile = rootTile;
+
+  while (tile) {
+    addPointToTileFullResolutionStats(tile, altitudeMeters, point.classification);
+
+    if (
+      tile.depth >= maxDepth ||
+      tile.diagonalMeters <= pointCloudConfig.tileMinDiagonalMeters
+    ) {
+      tile.fullPoints.push(point);
+      return;
+    }
+
+    const childIndex = getM3noChildIndex(metric, altitudeMeters, tile.bounds);
+    const childId = `${tile.id}.${childIndex}`;
+    let childTile = tileStates.get(childId);
+
+    if (!childTile) {
+      childTile = createM3noTileState({
+        id: childId,
+        parentId: tile.id,
+        fileIndex: tile.fileIndex,
+        depth: tile.depth + 1,
+        bounds: getM3noChildBounds(tile.bounds, childIndex),
+        crs,
+      });
+      tileStates.set(childId, childTile);
+      tile.childIds.push(childId);
+    }
+
+    tile = childTile;
+  }
+}
+
+function addPointToTileFullResolution(tile, point, altitudeMeters) {
+  addPointToTileFullResolutionStats(tile, altitudeMeters, point.classification);
+  tile.fullPoints.push(point);
+}
+
+function addPointToTileFullResolutionStats(tile, altitudeMeters, classification) {
+  tile.fullPointCount += 1;
+  tile.minZ = Math.min(tile.minZ, altitudeMeters);
+  tile.maxZ = Math.max(tile.maxZ, altitudeMeters);
+
+  if (tile.attributeIndexes) {
+    tile.attributeIndexes.altitude.min = Math.min(
+      tile.attributeIndexes.altitude.min,
+      altitudeMeters,
+    );
+    tile.attributeIndexes.altitude.max = Math.max(
+      tile.attributeIndexes.altitude.max,
+      altitudeMeters,
+    );
+    tile.attributeIndexes.classificationBins.add(classification);
+  }
+}
+
+function addPointToTileSample(tile, point, altitudeMeters) {
+  tile.originalPointCount += 1;
+  tile.pointCount = tile.originalPointCount;
+  tile.minZ = Math.min(tile.minZ, altitudeMeters);
+  tile.maxZ = Math.max(tile.maxZ, altitudeMeters);
+
+  if (tile.points.length < pointCloudConfig.tileSamplePoints) {
+    tile.points.push(point);
+    return;
+  }
+
+  const randomIndex = Math.floor(Math.random() * tile.originalPointCount);
+  if (randomIndex < pointCloudConfig.tileSamplePoints) {
+    tile.points[randomIndex] = point;
+  }
+}
+
+async function createTileRecordsAsync(tileStates, fileName, crs) {
+  const tiles = [...tileStates.values()].filter(
+    (tile) => tile.originalPointCount > 0 || tile.fullPointCount > 0,
+  );
+  const records = [];
+
+  for (let index = 0; index < tiles.length; index += 1) {
+    const tile = tiles[index];
+    records.push(createTileRecord(tile, tileStates, fileName, crs));
+
+    if (index > 0 && index % pointCloudConfig.indexedDbWriteBatchSize === 0) {
+      await yieldToBrowser();
+    }
+  }
+
+  return records;
+}
+
+function createTileRecord(tile, tileStates, fileName, crs) {
+  return {
+    id: tile.id,
+    key: tile.id,
+    parentId: tile.parentId,
+    childIds: tile.childIds.filter((childId) => {
+      const child = tileStates.get(childId);
+      return child?.originalPointCount > 0 || child?.fullPointCount > 0;
+    }),
+    fileIndex: tile.fileIndex,
+    fileName,
+    crsLabel: crs.label,
+    crsKind: crs.kind,
+    crsCode: crs.code || null,
+    crsZone: crs.zone || null,
+    crsNorthern: crs.northern ?? null,
+    depth: tile.depth,
+    bounds: tile.bounds,
+    diagonalMeters: tile.diagonalMeters,
+    originalPointCount: tile.originalPointCount,
+    fullPointCount: tile.fullPointCount,
+    sourcePointCount: Math.max(
+      tile.originalPointCount,
+      tile.fullPointCount,
+      tile.pointCount,
+    ),
+    pointCount: Math.max(tile.pointCount, tile.fullPointCount),
+    sampledPointCount: tile.points.length,
+    points: tile.points,
+    fullPoints: tile.fullPoints,
+    attributeIndexes: serializeTileAttributeIndexes(tile.attributeIndexes),
+    center: tile.center,
+    corners: tile.corners,
+    minZ: Number.isFinite(tile.minZ) ? tile.minZ : null,
+    maxZ: Number.isFinite(tile.maxZ) ? tile.maxZ : null,
+  };
+}
+
+function serializeTileAttributeIndexes(attributeIndexes) {
+  if (!attributeIndexes) {
+    return null;
+  }
+
+  const altitude = attributeIndexes.altitude || {};
+
+  return {
+    altitude:
+      Number.isFinite(altitude.min) && Number.isFinite(altitude.max)
+        ? { min: altitude.min, max: altitude.max }
+        : null,
+    classificationBins: attributeIndexes.classificationBins
+      ? [...attributeIndexes.classificationBins].sort((left, right) => left - right)
+      : [],
+  };
+}
+
+function createTileMetadataRecord(tileRecord) {
+  const { points, fullPoints, ...metadata } = tileRecord;
+  return metadata;
+}
+
+function getBoundsDiagonalMeters(bounds) {
+  return Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+}
+
+function getTileQuadrant(point, bounds) {
+  const middleX = (bounds.minX + bounds.maxX) / 2;
+  const middleY = (bounds.minY + bounds.maxY) / 2;
+  const east = point.x >= middleX ? 1 : 0;
+  const north = point.y >= middleY ? 2 : 0;
+
+  return east + north;
+}
+
+function getTileChildBounds(bounds, quadrant) {
+  const middleX = (bounds.minX + bounds.maxX) / 2;
+  const middleY = (bounds.minY + bounds.maxY) / 2;
+  const east = quadrant % 2 === 1;
+  const north = quadrant >= 2;
+
+  return {
+    minX: east ? middleX : bounds.minX,
+    maxX: east ? bounds.maxX : middleX,
+    minY: north ? middleY : bounds.minY,
+    maxY: north ? bounds.maxY : middleY,
+  };
+}
+
+function getHorizontalMetricCoordinate(x, y, crs) {
+  if (crs.kind === "geographic") {
+    return lngLatToWebMercatorMeters(x, y);
+  }
+
+  return { x, y };
+}
+
+function createTileCenter(minX, minY, maxX, maxY, crs) {
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+
+  if (crs.kind === "geographic") {
+    return webMercatorMetersToLngLat(centerX, centerY);
+  }
+
+  return projectLasCoordinate(centerX, centerY, 0, crs);
+}
+
+function createTileCorners(minX, minY, maxX, maxY, crs) {
+  const corners =
+    crs.kind === "geographic"
+      ? [
+          webMercatorMetersToLngLat(minX, minY),
+          webMercatorMetersToLngLat(maxX, minY),
+          webMercatorMetersToLngLat(maxX, maxY),
+          webMercatorMetersToLngLat(minX, maxY),
+        ]
+      : [
+          projectLasCoordinate(minX, minY, 0, crs),
+          projectLasCoordinate(maxX, minY, 0, crs),
+          projectLasCoordinate(maxX, maxY, 0, crs),
+          projectLasCoordinate(minX, maxY, 0, crs),
+        ];
+
+  return corners
+    .filter(
+      (corner) =>
+        Number.isFinite(corner.lng) &&
+        Number.isFinite(corner.lat) &&
+        Math.abs(corner.lng) <= 180 &&
+        Math.abs(corner.lat) <= 90,
+    )
+    .map((corner) => [corner.lng, corner.lat]);
+}
+
+function lngLatToWebMercatorMeters(lng, lat) {
+  const earthRadius = 6378137;
+  const clampedLat = Math.min(Math.max(lat, -85.05112878), 85.05112878);
+
+  return {
+    x: earthRadius * lng * (Math.PI / 180),
+    y:
+      earthRadius *
+      Math.log(Math.tan(Math.PI / 4 + (clampedLat * Math.PI) / 360)),
+  };
+}
+
+function webMercatorMetersToLngLat(x, y) {
+  const earthRadius = 6378137;
+
+  return {
+    lng: (x / earthRadius) * (180 / Math.PI),
+    lat: (2 * Math.atan(Math.exp(y / earthRadius)) - Math.PI / 2) * (180 / Math.PI),
   };
 }
 
@@ -1280,6 +2881,12 @@ function readLasHeader(view) {
   const offsetX = view.getFloat64(155, true);
   const offsetY = view.getFloat64(163, true);
   const offsetZ = view.getFloat64(171, true);
+  const maxX = view.getFloat64(179, true);
+  const minX = view.getFloat64(187, true);
+  const maxY = view.getFloat64(195, true);
+  const minY = view.getFloat64(203, true);
+  const maxZ = view.getFloat64(211, true);
+  const minZ = view.getFloat64(219, true);
 
   let pointCount = legacyPointCount;
   if (versionMajor === 1 && versionMinor >= 4 && view.byteLength >= 255) {
@@ -1308,6 +2915,12 @@ function readLasHeader(view) {
     offsetX,
     offsetY,
     offsetZ,
+    minX,
+    minY,
+    minZ,
+    maxX,
+    maxY,
+    maxZ,
   };
 }
 
@@ -1603,6 +3216,59 @@ function utmToLngLat(easting, northing, zone, northern) {
   return [lon * (180 / Math.PI), lat * (180 / Math.PI)];
 }
 
+function lngLatToUtm(lng, lat, zone, northern) {
+  const a = 6378137;
+  const f = 1 / 298.257223563;
+  const k0 = 0.9996;
+  const e = Math.sqrt(f * (2 - f));
+  const eSq = e * e;
+  const ePrimeSq = eSq / (1 - eSq);
+  const latRad = lat * (Math.PI / 180);
+  const lngRad = lng * (Math.PI / 180);
+  const lonOrigin = ((zone - 1) * 6 - 180 + 3) * (Math.PI / 180);
+  const sinLat = Math.sin(latRad);
+  const cosLat = Math.cos(latRad);
+  const tanLat = Math.tan(latRad);
+  const n = a / Math.sqrt(1 - eSq * sinLat * sinLat);
+  const t = tanLat * tanLat;
+  const c = ePrimeSq * cosLat * cosLat;
+  const longitudeDelta = (lngRad - lonOrigin) * cosLat;
+  const m =
+    a *
+    ((1 - eSq / 4 - (3 * eSq * eSq) / 64 - (5 * eSq ** 3) / 256) *
+      latRad -
+      ((3 * eSq) / 8 + (3 * eSq * eSq) / 32 + (45 * eSq ** 3) / 1024) *
+        Math.sin(2 * latRad) +
+      ((15 * eSq * eSq) / 256 + (45 * eSq ** 3) / 1024) *
+        Math.sin(4 * latRad) -
+      ((35 * eSq ** 3) / 3072) * Math.sin(6 * latRad));
+  const easting =
+    k0 *
+      n *
+      (longitudeDelta +
+        ((1 - t + c) * longitudeDelta ** 3) / 6 +
+        ((5 - 18 * t + t * t + 72 * c - 58 * ePrimeSq) *
+          longitudeDelta ** 5) /
+          120) +
+    500000;
+  let northing =
+    k0 *
+    (m +
+      n *
+        tanLat *
+        ((longitudeDelta * longitudeDelta) / 2 +
+          ((5 - t + 9 * c + 4 * c * c) * longitudeDelta ** 4) / 24 +
+          ((61 - 58 * t + t * t + 600 * c - 330 * ePrimeSq) *
+            longitudeDelta ** 6) /
+            720));
+
+  if (!northern) {
+    northing += 10000000;
+  }
+
+  return { x: easting, y: northing };
+}
+
 function readAscii(view, offset, length) {
   return new TextDecoder("utf-8").decode(
     new Uint8Array(view.buffer, view.byteOffset + offset, length),
@@ -1613,6 +3279,7 @@ async function start() {
   setStatus("Loading MapLibre...");
 
   try {
+    await resetVolatileTileDb();
     await loadMapLibre();
     setStatus("Loading map...");
     initMap();
