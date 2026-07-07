@@ -1,168 +1,168 @@
 # PointScape
 
-PointScape es una aplicacion web para visualizar nubes de puntos LiDAR en formato LAS sobre un mapa interactivo centrado en Las Palmas de Gran Canaria. El proyecto combina cartografia web, terreno 3D, controles de camara y un visor WebGL propio para cargar, clasificar, indexar y explorar puntos directamente en el navegador.
+PointScape is a web application for visualizing LiDAR point clouds in LAS format on top of an interactive map centered on Las Palmas de Gran Canaria. The project combines web mapping, 3D terrain, camera controls, and a custom WebGL point-cloud viewer that can load, classify, index, and explore points directly in the browser.
 
-El objetivo del proyecto es servir como demostrador tecnico y academico de visualizacion e indexacion en tiempo real de nubes de puntos, con una interfaz ligera que no requiere backend de procesamiento: los ficheros LAS se seleccionan localmente y el trabajo pesado se realiza en el cliente.
+The goal is to provide a technical and academic demonstrator for real-time point-cloud indexing and visualization. The application is intentionally lightweight and does not require a processing backend: LAS files are selected locally and the heavier work runs in the client.
 
-## Autoria
+## Authorship
 
-Desarrollado por **Jose Miguel Santana Nunez** en 2026.
+Developed by **Jose Miguel Santana Nunez** in 2026.
 
-Proyecto vinculado a la **Universidad de Las Palmas de Gran Canaria (ULPGC)** y a la **Escuela de Ingenieria Informatica (EII)**.
+The project is associated with the **University of Las Palmas de Gran Canaria (ULPGC)** and the **School of Computer Engineering (EII)**.
 
-Repositorio: <https://github.com/amazingsmash/point-scape>
+Repository: <https://github.com/amazingsmash/point-scape>
 
-## Caracteristicas principales
+## Main Features
 
-- Mapa interactivo con MapLibre GL JS.
-- Vista base con imagen satelital y mapa de calles.
-- Soporte de terreno, sombreado y exageracion vertical.
-- Carga local de uno o varios ficheros `.las`.
-- Visualizacion WebGL de puntos sobre el mapa.
-- Colores por clasificacion LAS.
-- Control de tamano de punto, desplazamiento vertical y ventaja de profundidad.
-- Modo de indexacion seleccionable: QuadTree o M3NO.
-- Carga adaptativa por nivel de detalle.
-- Visualizacion opcional de limites de nodos cargados y etiquetas de teselas.
-- Estadisticas de la nube de puntos cargada.
-- Boton para volar automaticamente hasta la nube de puntos.
-- Pantalla de presentacion corporativa al arrancar.
-- Acceso directo al repositorio de GitHub desde la interfaz.
+- Interactive map powered by MapLibre GL JS.
+- Satellite imagery and street-map base layers.
+- Terrain support, hillshading, and vertical exaggeration.
+- Local loading of one or more `.las` files.
+- WebGL visualization of points over the map.
+- Coloring by LAS classification.
+- Controls for point size, vertical offset, and depth advantage.
+- Selectable indexing mode: QuadTree or M3NO.
+- Adaptive level-of-detail loading.
+- Optional display of loaded node bounds and tile labels.
+- Point-cloud statistics after loading.
+- `Fly To Point Cloud` camera action.
+- Corporate splash screen on startup.
+- GitHub repository shortcut in the interface.
 
-## Requisitos
+## Requirements
 
 - Node.js.
-- Un navegador moderno con soporte WebGL.
-- Conexion a Internet para descargar librerias y teselas externas.
+- A modern browser with WebGL support.
+- Internet access for external libraries and map tiles.
 
-No hay dependencias npm instalables en este repositorio. El servidor local usa modulos nativos de Node.js y las librerias del visor se cargan desde CDN.
+There are no npm dependencies to install in this repository. The local server uses built-in Node.js modules, while the viewer libraries are loaded from CDNs.
 
-## Puesta en marcha
+## Running the Project
 
-Desde la raiz del proyecto:
+From the project root:
 
 ```bash
 npm start
 ```
 
-La aplicacion queda disponible en:
+The application will be available at:
 
 ```text
 http://127.0.0.1:5173/
 ```
 
-Tambien se puede cambiar el host o el puerto mediante variables de entorno:
+The host and port can also be changed with environment variables:
 
 ```bash
 HOST=127.0.0.1 PORT=5173 npm start
 ```
 
-En Windows, el repositorio incluye tambien `lanzar.cmd` y `lanzar.ps1` como accesos comodos para iniciar la aplicacion.
+On Windows, the repository also includes `lanzar.cmd` and `lanzar.ps1` as convenient launchers.
 
-## Uso basico
+## Basic Usage
 
-1. Abre la aplicacion en el navegador.
-2. Espera a que desaparezca la pantalla de presentacion.
-3. Usa el panel lateral para elegir mapa base, terreno, camara y parametros de LOD.
-4. Arrastra ficheros `.las` al area de carga o pulsa para seleccionarlos.
-5. Revisa las estadisticas de carga y usa `Fly To Point Cloud` para centrar la camara en los datos.
+1. Open the application in the browser.
+2. Wait for the splash screen to fade out.
+3. Use the side panel to choose the base map, terrain, camera, and LOD parameters.
+4. Drag `.las` files into the drop zone or click it to select files.
+5. Review the generated statistics and use `Fly To Point Cloud` to center the camera on the loaded data.
 
-Los ficheros LAS se procesan localmente en el navegador. No se suben a ningun servidor.
+LAS files are processed locally in the browser. They are not uploaded to any server.
 
-## Estructura del proyecto
+## Project Structure
 
 ```text
 .
-|-- index.html               # Estructura de la interfaz
-|-- styles.css               # Estilos visuales y layout responsive
-|-- script.js                # Logica principal de mapa, visor LAS y UI
-|-- las-index.worker.js      # Worker para indexacion/procesamiento LAS
-|-- server.js                # Servidor estatico local en Node.js
-|-- package.json             # Script de arranque
-|-- lanzar.cmd               # Lanzador para Windows
-|-- lanzar.ps1               # Lanzador para PowerShell
-`-- Real-time indexing...pdf # Documento academico relacionado
+|-- index.html               # Interface structure
+|-- styles.css               # Visual styles and responsive layout
+|-- script.js                # Main map, LAS viewer, and UI logic
+|-- las-index.worker.js      # Worker for LAS indexing/processing
+|-- server.js                # Local static server in Node.js
+|-- package.json             # Start script
+|-- lanzar.cmd               # Windows launcher
+|-- lanzar.ps1               # PowerShell launcher
+`-- Real-time indexing...pdf # Related academic document
 ```
 
-## Arquitectura tecnica
+## Technical Architecture
 
-La aplicacion es deliberadamente sencilla en despliegue: `server.js` sirve los archivos estaticos y el navegador ejecuta toda la logica interactiva.
+The application is deliberately simple to deploy: `server.js` serves static files, and the browser runs all interactive logic.
 
-El flujo principal es:
+The main flow is:
 
-1. `index.html` carga la interfaz y los estilos.
-2. `script.js` descarga MapLibre GL JS y Proj4 cuando hacen falta.
-3. El mapa se inicializa centrado en Las Palmas de Gran Canaria.
-4. Al cargar LAS, el worker procesa puntos, clasificaciones, limites y metadatos.
-5. Los datos se organizan por teselas/nodos para decidir que puntos mostrar segun camara, distancia y umbrales de LOD.
-6. Una capa WebGL personalizada dibuja la nube de puntos encima del mapa.
+1. `index.html` loads the interface and styles.
+2. `script.js` loads MapLibre GL JS and Proj4 when needed.
+3. The map initializes centered on Las Palmas de Gran Canaria.
+4. When LAS files are loaded, the worker processes points, classifications, bounds, and metadata.
+5. Data is organized into tiles/nodes so the viewer can decide which points to render based on camera state, distance, and LOD thresholds.
+6. A custom WebGL layer renders the point cloud above the map.
 
-La aplicacion usa una base IndexedDB volatil (`pointscape-volatile-tiles`) para gestionar teselas durante la sesion. Esa informacion se considera temporal y se reconstruye al volver a cargar datos.
+The application uses a volatile IndexedDB database (`pointscape-volatile-tiles`) to manage tiles during the current session. This information is temporary and is rebuilt when data is loaded again.
 
-## Datos y privacidad
+## Data and Privacy
 
-PointScape esta pensado para trabajar con ficheros LAS locales. El navegador lee los archivos seleccionados por el usuario y los procesa en la propia maquina.
+PointScape is designed to work with local LAS files. The browser reads the files selected by the user and processes them on the user's machine.
 
-Ten en cuenta que la aplicacion si solicita recursos externos para:
+The application does request external resources for:
 
 - MapLibre GL JS.
 - Proj4.
-- Teselas de mapas base.
-- Recursos de terreno o fuentes remotas.
-- Logos institucionales cargados desde sus URLs publicas.
+- Base-map tiles.
+- Terrain or remote source resources.
+- Institutional logos loaded from public URLs.
 
-Si necesitas un modo completamente offline, habria que empaquetar localmente esas dependencias y configurar fuentes de teselas propias.
+If a fully offline mode is required, those dependencies should be packaged locally and the map sources should be configured accordingly.
 
-## Atribuciones
+## Attribution
 
-- **Autor del proyecto:** Jose Miguel Santana Nunez.
-- **Institucion:** Universidad de Las Palmas de Gran Canaria.
-- **Centro:** Escuela de Ingenieria Informatica.
-- **Mapa y renderizado:** MapLibre GL JS.
-- **Transformaciones de coordenadas:** Proj4js.
-- **Cartografia base:** las fuentes externas configuradas en la aplicacion, incluyendo OpenStreetMap para el mapa de calles y servicios de teselas remotos para imagen/terreno.
-- **Datos LiDAR:** los ficheros LAS que cargue el usuario. La autoria, licencia y condiciones de uso de esos datos dependen de su proveedor original.
-- **Logo ULPGC:** marca institucional de la Universidad de Las Palmas de Gran Canaria.
-- **Logo EII/ULPGC:** marca institucional de la Escuela de Ingenieria Informatica de la ULPGC.
-- **Icono de GitHub:** marca de GitHub, usada como enlace al repositorio del proyecto.
+- **Project author:** Jose Miguel Santana Nunez.
+- **Institution:** University of Las Palmas de Gran Canaria.
+- **School:** School of Computer Engineering.
+- **Mapping and rendering:** MapLibre GL JS.
+- **Coordinate transformations:** Proj4js.
+- **Base cartography:** the external sources configured in the application, including OpenStreetMap for the street map and remote tile services for imagery/terrain.
+- **LiDAR data:** the LAS files loaded by the user. Authorship, licensing, and usage terms depend on each original data provider.
+- **ULPGC logo:** institutional mark of the University of Las Palmas de Gran Canaria.
+- **EII/ULPGC logo:** institutional mark of the School of Computer Engineering at ULPGC.
+- **GitHub icon:** GitHub mark, used as a link to the project repository.
 
-Las marcas institucionales y comerciales pertenecen a sus respectivos titulares. Este repositorio no reclama propiedad sobre dichas marcas.
+All institutional and commercial marks belong to their respective owners. This repository does not claim ownership over those marks.
 
-## Limitaciones conocidas
+## Known Limitations
 
-- Solo se contemplan ficheros LAS, no LAZ comprimido.
-- El rendimiento depende del tamano de la nube, la memoria disponible y la GPU del equipo.
-- Algunos recursos externos requieren conexion a Internet.
-- Las definiciones CRS pueden depender de fuentes remotas cuando el fichero necesita reproyeccion.
-- El servidor local no esta pensado como servidor de produccion ni implementa autenticacion.
+- LAS files are supported; compressed LAZ files are not currently supported.
+- Performance depends on point-cloud size, available memory, and the user's GPU.
+- Some resources require Internet access.
+- CRS definitions may depend on remote sources when reprojection is needed.
+- The local server is not intended as a production server and does not implement authentication.
 
-## Desarrollo
+## Development
 
-El proyecto no usa bundler ni framework frontend. Para modificarlo:
+The project does not use a bundler or frontend framework. To modify it:
 
-- Edita `index.html` para cambios de estructura.
-- Edita `styles.css` para cambios visuales.
-- Edita `script.js` para la logica de mapa, UI y renderizado.
-- Edita `las-index.worker.js` para cambios relacionados con indexacion o procesamiento intensivo.
+- Edit `index.html` for structural changes.
+- Edit `styles.css` for visual changes.
+- Edit `script.js` for map, UI, and rendering logic.
+- Edit `las-index.worker.js` for indexing or intensive processing changes.
 
-Despues de tocar JavaScript, una comprobacion rapida util es:
+After touching JavaScript, a useful quick check is:
 
 ```bash
 node --check script.js
 ```
 
-## Posibles mejoras futuras
+## Possible Future Improvements
 
-- Soporte para LAZ.
-- Empaquetado local de librerias y assets para modo offline.
-- Persistencia opcional de indices entre sesiones.
-- Exportacion de estadisticas de carga.
-- Mas controles de simbologia para clasificaciones LAS.
-- Seleccion de fuentes cartograficas configurables.
-- Tests automatizados para parseo, indexacion y seleccion de teselas.
+- LAZ support.
+- Local packaging of libraries and assets for offline use.
+- Optional persistence of indexes between sessions.
+- Exportable loading statistics.
+- More symbology controls for LAS classifications.
+- Configurable cartographic sources.
+- Automated tests for parsing, indexing, and tile selection.
 
-## Licencia
+## License
 
-La licencia del codigo no esta declarada en el repositorio. Antes de reutilizar, distribuir o publicar partes del proyecto, conviene anadir un archivo `LICENSE` con las condiciones de uso deseadas.
+The code license is not currently declared in the repository. Before reusing, distributing, or publishing parts of the project, a `LICENSE` file should be added with the intended terms of use.
 
-Los datos, logos, mapas y librerias externas mantienen sus propias licencias y condiciones.
+Data, logos, maps, and external libraries keep their own licenses and usage terms.
