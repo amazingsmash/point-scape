@@ -6,7 +6,7 @@ const defaultPointCloudConfig = {
   parseYieldEveryPoints: 5000,
   progressiveTilePointInterval: 100000,
   progressiveTileMinimumMs: 300,
-  indexedDbWriteBatchSize: 128,
+  indexedDbWriteBatchSize: 24,
 };
 
 let pointCloudConfig = { ...defaultPointCloudConfig };
@@ -152,7 +152,8 @@ function parseLasPointCloudQuadtree(buffer, options = {}) {
   return {
     fileIndex,
     crs,
-    points: [packPoints(rootTile.points)],
+    points:
+      options.includePointPreview === false ? [] : [packPoints(rootTile.points)],
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
     sourcePointCount: totalPoints,
@@ -266,7 +267,8 @@ function parseLasPointCloudM3no(buffer, options = {}) {
   return {
     fileIndex,
     crs,
-    points: [packPoints(rootTile.points)],
+    points:
+      options.includePointPreview === false ? [] : [packPoints(rootTile.points)],
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
     sourcePointCount: totalPoints,

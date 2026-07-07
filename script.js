@@ -37,7 +37,7 @@ const pointCloudConfig = {
   progressiveLoadingPreview: false,
   progressiveTilePointInterval: 100000,
   progressiveTileMinimumMs: 300,
-  indexedDbWriteBatchSize: 128,
+  indexedDbWriteBatchSize: 24,
   flyToClearanceMeters: 1000,
 };
 
@@ -1629,6 +1629,7 @@ async function saveTileRecords(tileRecords) {
         store.put(serializeTileRecordForStorage(record));
       });
     });
+    batch.forEach(stripTileRecordPointPayload);
     await yieldToBrowser();
   }
 }
@@ -1650,8 +1651,8 @@ function serializePointSetForStorage(pointSet) {
 
   return {
     pointCount: getPointSetCount(packedPointSet),
-    lngLatAltBuffer: copyArrayBufferSlice(packedPointSet.lngLatAlt),
-    classificationsBuffer: copyArrayBufferSlice(packedPointSet.classifications),
+    lngLatAltBuffer: getArrayBufferForStorage(packedPointSet.lngLatAlt),
+    classificationsBuffer: getArrayBufferForStorage(packedPointSet.classifications),
   };
 }
 
@@ -1723,11 +1724,23 @@ function packPointObjects(points) {
   };
 }
 
-function copyArrayBufferSlice(typedArray) {
+function getArrayBufferForStorage(typedArray) {
+  if (
+    typedArray.byteOffset === 0 &&
+    typedArray.byteLength === typedArray.buffer.byteLength
+  ) {
+    return typedArray.buffer;
+  }
+
   return typedArray.buffer.slice(
     typedArray.byteOffset,
     typedArray.byteOffset + typedArray.byteLength,
   );
+}
+
+function stripTileRecordPointPayload(record) {
+  record.points = null;
+  record.fullPoints = null;
 }
 
 async function getStoredTileRecord(tileKey) {
@@ -2734,7 +2747,6 @@ async function loadLasFiles(files) {
     window.pointCloudLayer.setPoints([], window.mapLibreMap);
     updateBlockBoundsLayer([]);
     renderPointCloudStats();
-    const allPoints = [];
     let allTiles = [];
     const crsLabelByFile = new Map();
     const crsByFile = new Map();
@@ -2826,6 +2838,7 @@ async function loadLasFiles(files) {
         fileIndex: index,
         fileName: file.name,
         indexingMode,
+        includePointPreview: false,
         onMetadata: useProgressiveLoadingPreview
           ? handleProgressiveMetadata
           : undefined,
@@ -2850,11 +2863,12 @@ async function loadLasFiles(files) {
         await saveTileRecords(result.tileRecords);
       }
       const saveFinishedAt = performance.now();
-      allPoints.push(...result.points);
       crsLabelByFile.set(result.fileIndex, result.crsLabel);
       crsByFile.set(result.fileIndex, result.crs);
       sourcePointCountByFile.set(result.fileIndex, result.sourcePointCount || 0);
       integrateTileMetadata(result.tiles);
+      result.points = [];
+      result.tileRecords = [];
       fileStats.push({
         name: file.name,
         sourcePointCount: result.sourcePointCount || 0,
@@ -2870,7 +2884,7 @@ async function loadLasFiles(files) {
     currentTileIndex = allTiles;
     currentTileCrsByFile = new Map(crsByFile);
     updateBlockBoundsLayer(allTiles.filter((tile) => !tile.parentId));
-    currentPointCloudFlyToPoints = allPoints;
+    currentPointCloudFlyToPoints = [];
     flyToPointCloudButton.hidden = false;
 
     ensurePointCloudTerrainEnabled();
@@ -2978,6 +2992,12 @@ function allocateRareClassBudgets(classCounts, maximumPoints) {
 }
 
 function flyToCurrentPointCloud() {
+  const rootTiles = currentTileIndex.filter((tile) => !tile.parentId);
+
+  if (rootTiles.length && flyToPointCloudTiles(rootTiles)) {
+    return;
+  }
+
   flyToLasPoints(
     getPointCollectionCount(currentPointCloudFlyToPoints)
       ? currentPointCloudFlyToPoints
@@ -3349,7 +3369,7 @@ async function parseLasPointCloudQuadtree(buffer, options = {}) {
   return {
     fileIndex,
     crs,
-    points: rootTile.points,
+    points: options.includePointPreview === false ? [] : rootTile.points,
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
     sourcePointCount: totalPoints,
@@ -3459,7 +3479,7 @@ async function parseLasPointCloudM3no(buffer, options = {}) {
   return {
     fileIndex,
     crs,
-    points: rootTile.points,
+    points: options.includePointPreview === false ? [] : rootTile.points,
     tiles: tileRecords.map(createTileMetadataRecord),
     tileRecords,
     sourcePointCount: totalPoints,
