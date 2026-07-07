@@ -70,6 +70,7 @@ const lasClassColors = new Map(
   lasClassifications.map(({ code, color }) => [code, color]),
 );
 
+const splashScreen = document.querySelector("#app-splash");
 const status = document.querySelector("#map-status");
 const menuToggle = document.querySelector("#menu-toggle");
 const menuContent = document.querySelector("#menu-content");
@@ -120,6 +121,22 @@ let currentTileCrsByFile = new Map();
 let pointCloudTileRefreshId = 0;
 let volatileTileDbPromise = null;
 let currentPointCloudStats = null;
+
+function scheduleSplashDismiss() {
+  if (!splashScreen) {
+    return;
+  }
+
+  const displayMs = 3000;
+  const fadeMs = 900;
+
+  window.setTimeout(() => {
+    splashScreen.classList.add("is-hiding");
+    window.setTimeout(() => {
+      splashScreen.hidden = true;
+    }, fadeMs);
+  }, displayMs);
+}
 
 function setStatus(message) {
   status.textContent = message;
@@ -4480,6 +4497,7 @@ function readAscii(view, offset, length) {
 }
 
 async function start() {
+  scheduleSplashDismiss();
   setStatus("Loading MapLibre...");
 
   try {

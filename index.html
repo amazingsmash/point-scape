@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Pointscape</title>
+    <title>PointScape</title>
     <link
       rel="stylesheet"
       href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css"
@@ -15,7 +15,45 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="map-shell" aria-label="Pointscape map">
+    <section
+      class="splash-screen"
+      id="app-splash"
+      aria-label="PointScape presentation"
+    >
+      <div class="splash-content">
+        <h1>PointScape</h1>
+        <div class="splash-logos" aria-label="Institutional logos">
+          <figure class="splash-logo-card">
+            <img
+              src="https://www.eii.ulpgc.es/sites/default/files/einginfor_h_c.svg"
+              alt="Universidad de Las Palmas de Gran Canaria y Escuela de Ingeniería Informática"
+            />
+          </figure>
+        </div>
+      </div>
+      <p class="splash-signature">José Miguel Santana Núñez · 2026</p>
+    </section>
+    <main class="map-shell" aria-label="PointScape map">
+      <section class="institutional-panel" aria-label="Institutional and project links">
+        <img
+          class="institutional-logo"
+          src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Logo_ULPGC_%282019%29.svg"
+          alt="Universidad de Las Palmas de Gran Canaria"
+        />
+        <a
+          class="github-link"
+          href="https://github.com/amazingsmash/point-scape"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open PointScape project on GitHub"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M12 0.3C5.37 0.3 0 5.67 0 12.3c0 5.3 3.44 9.8 8.21 11.39 0.6 0.11 0.82-0.26 0.82-0.58 0-0.28-0.01-1.04-0.02-2.04-3.34 0.73-4.04-1.61-4.04-1.61-0.55-1.39-1.33-1.76-1.33-1.76-1.09-0.75 0.08-0.73 0.08-0.73 1.2 0.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.49 0.99 0.11-0.78 0.42-1.3 0.76-1.6-2.67-0.3-5.47-1.33-5.47-5.93 0-1.31 0.47-2.38 1.24-3.22-0.12-0.3-0.54-1.52 0.12-3.17 0 0 1.01-0.32 3.3 1.23 0.96-0.27 1.98-0.4 3-0.4s2.04 0.14 3 0.4c2.29-1.55 3.3-1.23 3.3-1.23 0.66 1.65 0.24 2.87 0.12 3.17 0.77 0.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.62-5.49 5.92 0.43 0.37 0.82 1.1 0.82 2.22 0 1.6-0.01 2.9-0.01 3.3 0 0.32 0.22 0.69 0.83 0.57C20.56 22.1 24 17.6 24 12.3 24 5.67 18.63 0.3 12 0.3Z"
+            />
+          </svg>
+        </a>
+      </section>
       <section class="layer-panel" aria-labelledby="layers-title">
         <button
           class="menu-toggle"
@@ -25,7 +63,7 @@
           aria-controls="menu-content"
         >
           <span class="menu-icon" aria-hidden="true"></span>
-          <span id="layers-title">Pointscape</span>
+          <span id="layers-title">PointScape</span>
         </button>
         <div class="menu-content" id="menu-content" hidden>
           <details class="control-section" open>
@@ -253,6 +291,6 @@
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./script.js?v=44"></script>
+    <script src="./script.js?v=45"></script>
   </body>
 </html>
