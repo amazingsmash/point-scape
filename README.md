@@ -163,6 +163,8 @@ node --check script.js
 
 ## License
 
-The code license is not currently declared in the repository. Before reusing, distributing, or publishing parts of the project, a `LICENSE` file should be added with the intended terms of use.
+The project source code is released under the MIT License. See `LICENSE` for the full license text.
+
+Copyright (c) 2026 Jose Miguel Santana Nunez.
 
 Data, logos, maps, and external libraries keep their own licenses and usage terms.

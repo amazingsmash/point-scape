@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Web sencilla con MapLibre centrada en Las Palmas de Gran Canaria.",
+  "license": "MIT",
   "scripts": {
     "start": "node server.js"
   }
