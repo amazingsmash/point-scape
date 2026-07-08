@@ -149,18 +149,22 @@
                 <input type="checkbox" id="block-details-toggle" />
                 <span>Tile details</span>
               </label>
+              <label class="layer-option layer-option-toggle">
+                <input type="checkbox" id="lod-detail-boxes-toggle" />
+                <span>LOD detail boxes</span>
+              </label>
               <fieldset class="lod-control-group" aria-label="LOD parameters">
                 <legend>LOD controls</legend>
                 <label class="camera-control" for="lod-screen-diagonal-control">
-                  <span>Screen threshold</span>
-                  <output id="lod-screen-diagonal-value" for="lod-screen-diagonal-control">48 px</output>
+                  <span>Angular threshold</span>
+                  <output id="lod-screen-diagonal-value" for="lod-screen-diagonal-control">15.00 deg</output>
                   <input
                     type="range"
                     id="lod-screen-diagonal-control"
-                    min="12"
-                    max="160"
-                    step="1"
-                    value="48"
+                    min="1"
+                    max="90"
+                    step="0.05"
+                    value="15"
                   />
                 </label>
                 <label class="camera-control" for="lod-hysteresis-control">
@@ -291,6 +295,7 @@
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./script.js?v=45"></script>
+    <script src="./tile-selection.js?v=1"></script>
+    <script src="./script.js?v=48"></script>
   </body>
 </html>

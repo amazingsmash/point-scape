@@ -780,7 +780,7 @@ function createTileRecord(tile, tileStates, fileName, crs) {
     crsNorthern: crs.northern ?? null,
     depth: tile.depth,
     bounds: tile.bounds,
-    diagonalMeters: tile.diagonalMeters,
+    diagonalMeters: getTileDiagonalMeters(tile),
     originalPointCount: tile.originalPointCount,
     fullPointCount: tile.fullPointCount,
     sourcePointCount: Math.max(tile.originalPointCount, tile.fullPointCount, tile.pointCount),
@@ -819,8 +819,58 @@ function createTileMetadataRecord(tileRecord) {
   return metadata;
 }
 
+function getTileVerticalBounds(tile) {
+  const boundsMinZ = tile?.bounds?.minZ;
+  const boundsMaxZ = tile?.bounds?.maxZ;
+  const tileMinZ = tile?.minZ;
+  const tileMaxZ = tile?.maxZ;
+  const minZ = Number.isFinite(boundsMinZ)
+    ? boundsMinZ
+    : Number.isFinite(tileMinZ)
+      ? tileMinZ
+      : 0;
+  const maxZ = Number.isFinite(boundsMaxZ)
+    ? boundsMaxZ
+    : Number.isFinite(tileMaxZ)
+      ? tileMaxZ
+      : minZ;
+
+  return {
+    minZ: Math.min(minZ, maxZ),
+    maxZ: Math.max(minZ, maxZ),
+  };
+}
+
+function getTileDiagonalMeters(tile) {
+  const bounds = tile?.bounds;
+
+  if (!bounds) {
+    return Number.isFinite(tile?.diagonalMeters) ? tile.diagonalMeters : 0;
+  }
+
+  const { minZ, maxZ } = getTileVerticalBounds(tile);
+  const diagonalMeters = Math.hypot(
+    bounds.maxX - bounds.minX,
+    bounds.maxY - bounds.minY,
+    maxZ - minZ,
+  );
+
+  return Number.isFinite(diagonalMeters) && diagonalMeters > 0
+    ? diagonalMeters
+    : Number.isFinite(tile?.diagonalMeters)
+      ? tile.diagonalMeters
+      : 0;
+}
+
 function getBoundsDiagonalMeters(bounds) {
-  return Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+  const minZ = Number.isFinite(bounds.minZ) ? bounds.minZ : 0;
+  const maxZ = Number.isFinite(bounds.maxZ) ? bounds.maxZ : minZ;
+
+  return Math.hypot(
+    bounds.maxX - bounds.minX,
+    bounds.maxY - bounds.minY,
+    maxZ - minZ,
+  );
 }
 
 function getTileQuadrant(point, bounds) {

@@ -24,6 +24,7 @@ const layerIds = {
   blockBoundsLayer: "las-block-bounds-layer",
   blockLabelsLayer: "las-block-labels-layer",
   pointCloudLayer: "las-palmas-webgl-point-cloud",
+  detailBoxesLayer: "las-lod-detail-boxes-layer",
 };
 
 const pointCloudConfig = {
@@ -31,7 +32,7 @@ const pointCloudConfig = {
   m3noGridCellsPerAxis: 32,
   tileMinDiagonalMeters: 100,
   tileMaxDepth: 8,
-  fullResolutionScreenDiagonalPixels: 48,
+  fullResolutionAngularDiagonalDegrees: 15,
   tileCollapseHysteresisRatio: 0.1,
   parseYieldEveryPoints: 5000,
   progressiveLoadingPreview: false,
@@ -90,6 +91,7 @@ const lasIndexingModeInputs = document.querySelectorAll(
 const fullResolutionToggle = document.querySelector("#full-resolution-toggle");
 const blockBoundsToggle = document.querySelector("#block-bounds-toggle");
 const blockDetailsToggle = document.querySelector("#block-details-toggle");
+const lodDetailBoxesToggle = document.querySelector("#lod-detail-boxes-toggle");
 const lodScreenDiagonalControl = document.querySelector(
   "#lod-screen-diagonal-control",
 );
@@ -116,6 +118,7 @@ let currentPointCloudTiles = [];
 let currentPointCloudSummary = null;
 let currentActiveTileIds = new Set();
 let currentExpandedTileIds = new Set();
+let currentPendingDetailTileIds = new Set();
 let currentTileIndex = [];
 let currentTileCrsByFile = new Map();
 let pointCloudTileRefreshId = 0;
@@ -335,6 +338,8 @@ function addMapLayers() {
     addBlockBoundsLayer();
     window.pointCloudLayer = createWebGlPointCloudLayer();
     map.addLayer(window.pointCloudLayer);
+    window.detailBoxesLayer = createWebGlDetailBoxesLayer();
+    map.addLayer(window.detailBoxesLayer);
   }
 }
 
@@ -399,7 +404,9 @@ function createWebGlPointCloudLayer() {
     onAdd(map, gl) {
       this.pointCount = 0;
       this.points = [];
+      this.tiles = [];
       this.tileBuffers = [];
+      this.tileBuffersById = new Map();
       this.gl = gl;
 
       const isWebGl2 =
@@ -433,20 +440,89 @@ function createWebGlPointCloudLayer() {
     },
 
     updateElevationBuffer(map) {
-      if (!this.gl || !this.points) {
+      if (!this.gl) {
         return;
       }
 
-      deletePointCloudTileBuffers(this.gl, this.tileBuffers);
-      this.tileBuffers = createPointCloudTileBuffers(
-        this.gl,
-        normalizePointBatches(this.points),
-        map,
-        terrainToggle.checked,
+      this.setTiles(this.tiles, map, { forceRebuild: true });
+    },
+
+    hasTileBuffer(tileId, renderKey) {
+      const tileBuffer = this.tileBuffersById.get(tileId);
+      return Boolean(tileBuffer && tileBuffer.renderKey === renderKey);
+    },
+
+    setTiles(tiles, map, options = {}) {
+      if (!this.gl) {
+        return;
+      }
+
+      const previousTilesById = new Map(
+        (this.tiles || []).map((tile) => [tile.id, tile]),
+      );
+      const nextTiles = normalizeRenderableTiles(
+        tiles,
+        this.tileBuffersById,
+      ).map((tile) => {
+        if (getPointSetCount(tile.points) > 0) {
+          return tile;
+        }
+
+        const previousTile = previousTilesById.get(tile.id);
+        if (
+          previousTile?.renderKey === tile.renderKey &&
+          getPointSetCount(previousTile.points) > 0
+        ) {
+          return { ...tile, points: previousTile.points };
+        }
+
+        return tile;
+      });
+      const nextTileIds = new Set(nextTiles.map((tile) => tile.id));
+
+      if (options.forceRebuild) {
+        deletePointCloudTileBuffers(this.gl, this.tileBuffers);
+        this.tileBuffersById.clear();
+      } else {
+        this.tileBuffersById.forEach((tileBuffer, tileId) => {
+          if (!nextTileIds.has(tileId)) {
+            deletePointCloudTileBuffer(this.gl, tileBuffer);
+            this.tileBuffersById.delete(tileId);
+          }
+        });
+      }
+
+      this.tiles = nextTiles;
+      this.points = nextTiles
+        .map((tile) => tile.points)
+        .filter((pointSet) => getPointSetCount(pointSet) > 0);
+      this.tileBuffers = nextTiles.map((tile) => {
+        const existingBuffer = this.tileBuffersById.get(tile.id);
+
+        if (existingBuffer?.renderKey === tile.renderKey) {
+          return existingBuffer;
+        }
+
+        if (existingBuffer) {
+          deletePointCloudTileBuffer(this.gl, existingBuffer);
+        }
+
+        const nextBuffer = createPointCloudTileBuffer(
+          this.gl,
+          tile,
+          map,
+          terrainToggle.checked,
+        );
+        this.tileBuffersById.set(tile.id, nextBuffer);
+        return nextBuffer;
+      });
+      this.pointCount = this.tileBuffers.reduce(
+        (sum, tileBuffer) => sum + tileBuffer.pointCount,
+        0,
       );
 
       this.gl.bindBuffer(this.gl.ARRAY_BUFFER, null);
-      if (typeof map.triggerRepaint === "function") {
+      if (typeof map?.triggerRepaint === "function") {
         map.triggerRepaint();
       }
     },
@@ -456,9 +532,14 @@ function createWebGlPointCloudLayer() {
         return;
       }
 
-      this.points = normalizePointBatches(points);
-      this.pointCount = getPointCollectionCount(this.points);
-      this.updateElevationBuffer(map);
+      this.setTiles(
+        normalizePointBatches(points).map((pointBatch, index) => ({
+          id: `point-batch:${index}`,
+          points: pointBatch,
+        })),
+        map,
+        { forceRebuild: true },
+      );
     },
 
     render(gl, args) {
@@ -537,6 +618,129 @@ function createWebGlPointCloudLayer() {
     onRemove(map, gl) {
       deletePointCloudTileBuffers(gl, this.tileBuffers);
       this.tileBuffers = [];
+      this.tileBuffersById.clear();
+      if (this.program) {
+        gl.deleteProgram(this.program);
+      }
+    },
+  };
+}
+
+function createWebGlDetailBoxesLayer() {
+  return {
+    id: layerIds.detailBoxesLayer,
+    type: "custom",
+    renderingMode: "3d",
+
+    onAdd(map, gl) {
+      this.tiles = [];
+      this.lineVertexCount = 0;
+      this.anchorMercator = [0, 0, 0];
+      this.buffer = null;
+      this.gl = gl;
+
+      this.program = createProgram(
+        gl,
+        `
+          precision highp float;
+          uniform mat4 u_matrix;
+          uniform vec4 u_anchor_clip;
+          attribute vec3 a_position;
+
+          void main() {
+            gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
+          }
+        `,
+        `
+          precision highp float;
+          uniform vec4 u_color;
+
+          void main() {
+            gl_FragColor = u_color;
+          }
+        `,
+      );
+      this.positionLocation = gl.getAttribLocation(this.program, "a_position");
+      this.matrixLocation = gl.getUniformLocation(this.program, "u_matrix");
+      this.anchorClipLocation = gl.getUniformLocation(this.program, "u_anchor_clip");
+      this.colorLocation = gl.getUniformLocation(this.program, "u_color");
+    },
+
+    setTiles(tiles, map) {
+      if (!this.gl) {
+        return;
+      }
+
+      this.tiles = Array.isArray(tiles) ? tiles : [];
+      updateDetailBoxBuffer(this, map);
+
+      if (typeof map?.triggerRepaint === "function") {
+        map.triggerRepaint();
+      }
+    },
+
+    render(gl, args) {
+      if (!this.buffer || !this.lineVertexCount) {
+        return;
+      }
+
+      const matrix =
+        args?.defaultProjectionData?.mainMatrix ||
+        args?.modelViewProjectionMatrix ||
+        args;
+
+      gl.useProgram(this.program);
+      gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
+      gl.uniform4f(this.colorLocation, 1, 0.48, 0.05, 0.92);
+      gl.uniform4fv(
+        this.anchorClipLocation,
+        multiplyMatrixAndMercatorPoint(matrix, this.anchorMercator),
+      );
+
+      const wasDepthTestEnabled = gl.isEnabled(gl.DEPTH_TEST);
+      const wasBlendEnabled = gl.isEnabled(gl.BLEND);
+      const previousDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+      const previousBlendSourceRgb = gl.getParameter(gl.BLEND_SRC_RGB);
+      const previousBlendDestinationRgb = gl.getParameter(gl.BLEND_DST_RGB);
+      const previousBlendSourceAlpha = gl.getParameter(gl.BLEND_SRC_ALPHA);
+      const previousBlendDestinationAlpha = gl.getParameter(gl.BLEND_DST_ALPHA);
+
+      gl.disable(gl.DEPTH_TEST);
+      gl.depthMask(false);
+      gl.enable(gl.BLEND);
+      gl.blendFuncSeparate(
+        gl.SRC_ALPHA,
+        gl.ONE_MINUS_SRC_ALPHA,
+        gl.ONE,
+        gl.ONE_MINUS_SRC_ALPHA,
+      );
+      gl.lineWidth(2);
+      gl.enableVertexAttribArray(this.positionLocation);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
+      gl.vertexAttribPointer(this.positionLocation, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.LINES, 0, this.lineVertexCount);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      gl.disableVertexAttribArray(this.positionLocation);
+
+      if (wasDepthTestEnabled) {
+        gl.enable(gl.DEPTH_TEST);
+      }
+      gl.depthMask(previousDepthMask);
+      gl.blendFuncSeparate(
+        previousBlendSourceRgb,
+        previousBlendDestinationRgb,
+        previousBlendSourceAlpha,
+        previousBlendDestinationAlpha,
+      );
+      if (!wasBlendEnabled) {
+        gl.disable(gl.BLEND);
+      }
+    },
+
+    onRemove(map, gl) {
+      if (this.buffer) {
+        gl.deleteBuffer(this.buffer);
+      }
       if (this.program) {
         gl.deleteProgram(this.program);
       }
@@ -564,32 +768,211 @@ function normalizePointBatches(pointSets) {
   return pointSets.filter((pointSet) => getPointSetCount(pointSet) > 0);
 }
 
+function normalizeRenderableTiles(tiles, existingBuffersById = new Map()) {
+  if (!Array.isArray(tiles)) {
+    return [];
+  }
+
+  return tiles
+    .map((tile, index) => {
+      const id = tile?.id || `tile:${index}`;
+      const points =
+        tile && Object.prototype.hasOwnProperty.call(Object(tile), "points")
+          ? tile.points
+          : tile;
+      const pointCount = getPointSetCount(points);
+      const existingBuffer = existingBuffersById.get(id);
+      const renderKey =
+        tile?.renderKey ||
+        `${id}:${pointCount || existingBuffer?.pointCount || 0}`;
+
+      return {
+        id,
+        points,
+        pointCount:
+          pointCount || tile?.pointCount || existingBuffer?.pointCount || 0,
+        renderKey,
+      };
+    })
+    .filter(
+      (tile) =>
+        getPointSetCount(tile.points) > 0 ||
+        existingBuffersById.get(tile.id)?.renderKey === tile.renderKey,
+    );
+}
+
 function createPointCloudTileBuffers(gl, pointBatches, map, useTerrainElevation) {
-  return pointBatches.map((pointBatch) => {
-    const pointBuffer = createPointCloudBuffer(
-      pointBatch,
+  return pointBatches.map((pointBatch, index) =>
+    createPointCloudTileBuffer(
+      gl,
+      {
+        id: `point-batch:${index}`,
+        points: pointBatch,
+        renderKey: `point-batch:${index}:${getPointSetCount(pointBatch)}`,
+      },
       map,
       useTerrainElevation,
-    );
-    const buffer = gl.createBuffer();
+    ),
+  );
+}
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, pointBuffer.data, gl.DYNAMIC_DRAW);
+function createPointCloudTileBuffer(gl, tile, map, useTerrainElevation) {
+  const pointBuffer = createPointCloudBuffer(
+    tile.points,
+    map,
+    useTerrainElevation,
+  );
+  const buffer = gl.createBuffer();
 
-    return {
-      buffer,
-      pointCount: pointBuffer.pointCount,
-      anchorMercator: pointBuffer.anchorMercator,
-    };
-  });
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, pointBuffer.data, gl.DYNAMIC_DRAW);
+
+  return {
+    id: tile.id,
+    renderKey: tile.renderKey,
+    buffer,
+    pointCount: pointBuffer.pointCount,
+    anchorMercator: pointBuffer.anchorMercator,
+  };
 }
 
 function deletePointCloudTileBuffers(gl, tileBuffers = []) {
   tileBuffers.forEach((tileBuffer) => {
-    if (tileBuffer.buffer) {
-      gl.deleteBuffer(tileBuffer.buffer);
-    }
+    deletePointCloudTileBuffer(gl, tileBuffer);
   });
+}
+
+function deletePointCloudTileBuffer(gl, tileBuffer) {
+  if (tileBuffer?.buffer) {
+    gl.deleteBuffer(tileBuffer.buffer);
+  }
+}
+
+function updateDetailBoxBuffer(layer, map) {
+  const gl = layer.gl;
+  const mercatorPoints = [];
+
+  layer.tiles.forEach((tile) => {
+    mercatorPoints.push(...createDetailBoxMercatorLinePoints(tile));
+  });
+
+  if (layer.buffer) {
+    gl.deleteBuffer(layer.buffer);
+    layer.buffer = null;
+  }
+
+  layer.lineVertexCount = mercatorPoints.length;
+
+  if (!mercatorPoints.length) {
+    layer.anchorMercator = [0, 0, 0];
+    return;
+  }
+
+  layer.anchorMercator = getMercatorPointCloudAnchor(mercatorPoints);
+  const positions = new Float32Array(mercatorPoints.length * 3);
+
+  mercatorPoints.forEach((point, index) => {
+    const offset = index * 3;
+    positions[offset] = point.x - layer.anchorMercator[0];
+    positions[offset + 1] = point.y - layer.anchorMercator[1];
+    positions[offset + 2] = point.z - layer.anchorMercator[2];
+  });
+
+  layer.buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, layer.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+}
+
+function createDetailBoxMercatorLinePoints(tile) {
+  const corners = createDetailBoxMercatorCorners(tile);
+
+  if (corners.length !== 8) {
+    return [];
+  }
+
+  const edgeIndexes = [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+  ];
+
+  return edgeIndexes.flatMap(([start, end]) => [corners[start], corners[end]]);
+}
+
+function createDetailBoxMercatorCorners(tile) {
+  const bounds = tile?.bounds;
+
+  if (!bounds) {
+    return [];
+  }
+
+  const { minZ, maxZ } = getTileVerticalBounds(tile);
+  const coordinates = [
+    [bounds.minX, bounds.minY, minZ],
+    [bounds.maxX, bounds.minY, minZ],
+    [bounds.maxX, bounds.maxY, minZ],
+    [bounds.minX, bounds.maxY, minZ],
+    [bounds.minX, bounds.minY, maxZ],
+    [bounds.maxX, bounds.minY, maxZ],
+    [bounds.maxX, bounds.maxY, maxZ],
+    [bounds.minX, bounds.maxY, maxZ],
+  ];
+
+  return coordinates
+    .map(([x, y, z]) => projectTileMetricCornerToMercator(tile, x, y, z))
+    .filter(Boolean);
+}
+
+function projectTileMetricCornerToMercator(tile, x, y, z) {
+  const crs = getTileCrs(tile);
+  const verticalExaggeration = terrainToggle.checked ? getTerrainExaggeration() : 1;
+  const altitude =
+    z * verticalExaggeration + getPointCloudOffsetMeters();
+  const projected =
+    crs.kind === "geographic"
+      ? webMercatorMetersToLngLat(x, y)
+      : projectLasCoordinate(x, y, z, crs);
+  const lng = projected.lng;
+  const lat = projected.lat;
+
+  if (
+    !Number.isFinite(lng) ||
+    !Number.isFinite(lat) ||
+    Math.abs(lng) > 180 ||
+    Math.abs(lat) > 90
+  ) {
+    return null;
+  }
+
+  return maplibregl.MercatorCoordinate.fromLngLat({ lng, lat }, altitude);
+}
+
+function getMercatorPointCloudAnchor(points) {
+  const totals = points.reduce(
+    (accumulator, point) => {
+      accumulator.x += point.x;
+      accumulator.y += point.y;
+      accumulator.z += point.z;
+      return accumulator;
+    },
+    { x: 0, y: 0, z: 0 },
+  );
+
+  return [
+    totals.x / points.length,
+    totals.y / points.length,
+    totals.z / points.length,
+  ];
 }
 
 function drawPointCloudTileBuffers(layer, gl, matrix) {
@@ -1018,6 +1401,7 @@ function bindLayerMenu() {
       applyTerrainExaggeration();
       refreshPointCloudElevation();
       refreshTileBounds();
+      updateDetailBoxesLayer();
     }
   });
 
@@ -1026,6 +1410,7 @@ function bindLayerMenu() {
     pointOffsetValue.textContent = `${offset.toFixed(offset % 1 ? 1 : 0)} m`;
     refreshPointCloudElevation();
     refreshTileBounds();
+    updateDetailBoxesLayer();
   });
 
   pointSizeControl.addEventListener("input", () => {
@@ -1043,6 +1428,10 @@ function bindLayerMenu() {
     setBlockDetailsVisible(blockDetailsToggle.checked);
   });
 
+  lodDetailBoxesToggle?.addEventListener("change", () => {
+    updateDetailBoxesLayer();
+  });
+
   randomizeClassificationColorsButton?.addEventListener("click", () => {
     randomizeLasClassColors();
   });
@@ -1052,9 +1441,9 @@ function bindLayerMenu() {
   });
 
   lodScreenDiagonalControl?.addEventListener("input", () => {
-    pointCloudConfig.fullResolutionScreenDiagonalPixels = readNumericControl(
+    pointCloudConfig.fullResolutionAngularDiagonalDegrees = readNumericControl(
       lodScreenDiagonalControl,
-      pointCloudConfig.fullResolutionScreenDiagonalPixels,
+      pointCloudConfig.fullResolutionAngularDiagonalDegrees,
     );
     updateLodControlLabels();
     applyPointCloudTileSelection({ updateStatus: true });
@@ -1264,15 +1653,35 @@ function updateBlockBoundsLayer(blocks) {
   }
 }
 
+function updateDetailBoxesLayer() {
+  const map = window.mapLibreMap;
+  const layer = window.detailBoxesLayer;
+
+  if (!map || !layer?.setTiles) {
+    return;
+  }
+
+  if (!lodDetailBoxesToggle?.checked) {
+    layer.setTiles([], map);
+    return;
+  }
+
+  const pendingTiles = currentTileIndex.filter((tile) =>
+    currentPendingDetailTileIds.has(tile.id),
+  );
+  layer.setTiles(pendingTiles, map);
+}
+
 function createBlockBoundsGeoJson(blocks) {
   const mapCenter = window.mapLibreMap?.getCenter?.();
+  const map = window.mapLibreMap;
 
   return {
     type: "FeatureCollection",
     features: blocks
       .filter((block) => block.corners?.length === 4 && block.pointCount > 0)
       .map((block) => {
-        const distanceMeters = getTileDistanceMeters(block, mapCenter);
+        const distanceMeters = getTileDistanceMeters(block, mapCenter, map);
         const diagonalDistanceRatio = getTileDiagonalDistanceRatio(
           block,
           distanceMeters,
@@ -1319,7 +1728,7 @@ function getTileDiagonalDistanceRatio(tile, distanceMeters) {
     return Infinity;
   }
 
-  return tile.diagonalMeters / distanceMeters;
+  return getTileDiagonalMeters(tile) / distanceMeters;
 }
 
 function formatRatio(ratio) {
@@ -1427,6 +1836,7 @@ function setElevationEnabled(enabled, options = {}) {
 
   refreshPointCloudElevation();
   refreshTileBounds();
+  updateDetailBoxesLayer();
   map.once("idle", refreshPointCloudElevation);
 }
 
@@ -1467,7 +1877,7 @@ function getLasIndexingModeLabel(mode = getSelectedLasIndexingMode()) {
 function syncLodControlsFromConfig() {
   if (lodScreenDiagonalControl) {
     lodScreenDiagonalControl.value = String(
-      pointCloudConfig.fullResolutionScreenDiagonalPixels,
+      pointCloudConfig.fullResolutionAngularDiagonalDegrees,
     );
   }
 
@@ -1490,9 +1900,10 @@ function syncLodControlsFromConfig() {
 
 function updateLodControlLabels() {
   if (lodScreenDiagonalValue) {
-    lodScreenDiagonalValue.textContent = `${Math.round(
-      pointCloudConfig.fullResolutionScreenDiagonalPixels,
-    )} px`;
+    lodScreenDiagonalValue.textContent = `${formatNumber(
+      pointCloudConfig.fullResolutionAngularDiagonalDegrees,
+      2,
+    )} deg`;
   }
 
   if (lodHysteresisValue) {
@@ -1585,7 +1996,16 @@ function openVolatileTileDb() {
         });
       }
     };
-    openRequest.onsuccess = () => resolve(openRequest.result);
+    openRequest.onsuccess = () => {
+      const db = openRequest.result;
+
+      db.onversionchange = () => {
+        db.close();
+        volatileTileDbPromise = null;
+      };
+
+      resolve(db);
+    };
   });
 }
 
@@ -1852,6 +2272,9 @@ async function applyPointCloudTileSelection(options = {}) {
     window.mapLibreMap,
   );
   const activeTileIds = activeTileMetadata.map((tile) => tile.id);
+  const activeTileDescriptors = activeTileMetadata.map(
+    getRenderableTileDescriptor,
+  );
 
   if (refreshId !== pointCloudTileRefreshId) {
     return;
@@ -1859,7 +2282,11 @@ async function applyPointCloudTileSelection(options = {}) {
 
   if (!activeTileIds.length) {
     currentPointCloudPoints = [];
-    window.pointCloudLayer.setPoints([], window.mapLibreMap);
+    currentPendingDetailTileIds = new Set();
+    window.pointCloudLayer.setTiles([], window.mapLibreMap, {
+      forceRebuild: true,
+    });
+    updateDetailBoxesLayer();
     updateBlockBoundsLayer([]);
 
     if (options.updateStatus !== false) {
@@ -1869,35 +2296,95 @@ async function applyPointCloudTileSelection(options = {}) {
     return;
   }
 
-  const activeTiles = await getStoredTileRecords(activeTileIds);
+  const tileIdsToFetch = activeTileDescriptors
+    .filter(
+      (tile) =>
+        !window.pointCloudLayer.hasTileBuffer?.(tile.id, tile.renderKey),
+    )
+    .map((tile) => tile.id);
+  currentPendingDetailTileIds = getPendingDetailParentTileIds(tileIdsToFetch);
+  updateDetailBoxesLayer();
+  const activeTiles = await getStoredTileRecords(tileIdsToFetch);
 
   if (refreshId !== pointCloudTileRefreshId) {
     return;
   }
 
   const activeTilesById = new Map(activeTiles.map((tile) => [tile.id, tile]));
+  const missingTileIds = tileIdsToFetch.filter(
+    (tileId) => !activeTilesById.has(tileId),
+  );
   const points = [];
+  const renderableTiles = [];
   let renderedPointCount = 0;
   let availablePointCount = 0;
 
   activeTileMetadata.forEach((metadata) => {
-    const record = activeTilesById.get(metadata.id) || metadata;
-    const tilePoints = getRenderableTilePoints(record);
+    const fetchedRecord = activeTilesById.get(metadata.id);
+    const descriptor = fetchedRecord
+      ? getRenderableTileDescriptor(fetchedRecord)
+      : getRenderableTileDescriptor(metadata);
+    const tilePoints = descriptor.points;
+    const pointCount =
+      getPointSetCount(tilePoints) ||
+      (window.pointCloudLayer.hasTileBuffer?.(
+        descriptor.id,
+        descriptor.renderKey,
+      )
+        ? descriptor.pointCount
+        : 0);
 
     availablePointCount +=
-      record.sourcePointCount ||
-      record.originalPointCount ||
-      record.fullPointCount ||
-      getPointSetCount(tilePoints);
-    renderedPointCount += getPointSetCount(tilePoints);
+      metadata.sourcePointCount ||
+      metadata.originalPointCount ||
+      metadata.fullPointCount ||
+      pointCount;
+    renderedPointCount += pointCount;
 
-    if (getPointSetCount(tilePoints) > 0) {
-      points.push(tilePoints);
+    if (pointCount > 0) {
+      if (getPointSetCount(tilePoints) > 0) {
+        points.push(tilePoints);
+      }
+      renderableTiles.push({
+        id: descriptor.id,
+        points: tilePoints,
+        pointCount,
+        renderKey: descriptor.renderKey,
+      });
     }
   });
 
-  currentPointCloudPoints = points;
-  window.pointCloudLayer.setPoints(points, window.mapLibreMap);
+  if (
+    missingTileIds.length &&
+    options.retryMissingTiles !== false
+  ) {
+    currentPendingDetailTileIds = getPendingDetailParentTileIds(missingTileIds);
+    updateDetailBoxesLayer();
+
+    if (!renderedPointCount && options.updateStatus !== false) {
+      lasStatus.textContent = `Loading ${missingTileIds.length.toLocaleString(
+        "en-US",
+      )} active tile payloads...`;
+    }
+
+    window.setTimeout(() => {
+      if (refreshId === pointCloudTileRefreshId) {
+        applyPointCloudTileSelection({
+          ...options,
+          retryMissingTiles: false,
+        });
+      }
+    }, 120);
+
+    if (!renderedPointCount) {
+      return;
+    }
+  }
+
+  window.pointCloudLayer.setTiles(renderableTiles, window.mapLibreMap);
+  currentPendingDetailTileIds = getPendingDetailParentTileIds(missingTileIds);
+  updateDetailBoxesLayer();
+  currentPointCloudPoints = window.pointCloudLayer.points || points;
   updateBlockBoundsLayer(activeTileMetadata);
   updateLivePointCloudStats(
     renderedPointCount,
@@ -1914,16 +2401,65 @@ async function applyPointCloudTileSelection(options = {}) {
   }
 }
 
-function getRenderableTilePoints(record) {
-  if (
+function getRenderableTileDescriptor(record) {
+  const useFullResolution =
     isFullResolutionEnabled() &&
     isFullResolutionTile(record) &&
-    getPointSetCount(record.fullPoints)
-  ) {
-    return record.fullPoints;
+    (getPointSetCount(record.fullPoints) || record.fullPointCount);
+  const source = useFullResolution ? "full" : "sample";
+  const points = useFullResolution ? record.fullPoints : record.points;
+  const pointCount =
+    getPointSetCount(points) ||
+    (useFullResolution ? record.fullPointCount : record.sampledPointCount) ||
+    0;
+
+  return {
+    id: record.id,
+    points: points || null,
+    pointCount,
+    source,
+    renderKey: `${record.id}:${source}:${pointCount}`,
+  };
+}
+
+function getRenderableTilePayload(record) {
+  const { points, source } = getRenderableTileDescriptor(record);
+
+  return { points, source };
+}
+
+function getRenderableTilePoints(record) {
+  return getRenderableTilePayload(record).points;
+}
+
+function getPendingDetailParentTileIds(pendingTileIds) {
+  if (!pendingTileIds.length || !currentExpandedTileIds.size) {
+    return new Set();
   }
 
-  return record.points || null;
+  const recordsById = new Map(currentTileIndex.map((tile) => [tile.id, tile]));
+  const pendingParentIds = new Set();
+
+  pendingTileIds.forEach((tileId) => {
+    let tile = recordsById.get(tileId);
+
+    while (tile?.parentId) {
+      const parent = recordsById.get(tile.parentId);
+
+      if (!parent) {
+        return;
+      }
+
+      if (currentExpandedTileIds.has(parent.id)) {
+        pendingParentIds.add(parent.id);
+        return;
+      }
+
+      tile = parent;
+    }
+  });
+
+  return pendingParentIds;
 }
 
 function isFullResolutionTile(record) {
@@ -2005,26 +2541,15 @@ function forEachPointInSet(pointSet, callback) {
 }
 
 function selectActiveTiles(records, map) {
-  const recordsById = new Map(records.map((record) => [record.id, record]));
-  const rootTiles = records
-    .filter((record) => !record.parentId)
-    .sort((left, right) => left.fileIndex - right.fileIndex);
-  const activeTiles = [];
-  const nextExpandedTileIds = new Set();
   const mapCenter = map?.getCenter?.();
   const useAccumulatedLod = currentPointCloudSummary?.indexingMode === "m3no";
-
-  rootTiles.forEach((tile) => {
-    collectActiveTiles(
-      tile,
-      recordsById,
-      map,
-      mapCenter,
+  const { activeTiles, nextExpandedTileIds } =
+    PointScapeTileSelection.selectActiveTiles(records, {
       useAccumulatedLod,
-      activeTiles,
-      nextExpandedTileIds,
-    );
-  });
+      previousExpandedTileIds: currentExpandedTileIds,
+      isTileVisible: (tile) => isTileLoadableInMap(tile, map, mapCenter),
+      shouldExpandTile: (tile) => shouldExpandTile(tile, map, mapCenter),
+    });
 
   currentExpandedTileIds = nextExpandedTileIds;
   currentActiveTileIds = new Set(activeTiles.map((tile) => tile.id));
@@ -2032,128 +2557,53 @@ function selectActiveTiles(records, map) {
   return activeTiles;
 }
 
-function collectActiveTiles(
-  tile,
-  recordsById,
-  map,
-  mapCenter,
-  useAccumulatedLod,
-  activeTiles,
-  nextExpandedTileIds,
-) {
-  if (useAccumulatedLod) {
-    activeTiles.push(tile);
-  }
-
-  const childTiles = (tile.childIds || [])
-    .map((childId) => recordsById.get(childId))
-    .filter(Boolean);
-
-  if (!childTiles.length) {
-    if (!useAccumulatedLod) {
-      activeTiles.push(tile);
-    }
-    return;
-  }
-
-  const shouldExpand = shouldExpandTile(tile, map, mapCenter);
-
-  if (!shouldExpand) {
-    if (!useAccumulatedLod) {
-      activeTiles.push(tile);
-    }
-    return;
-  }
-
-  nextExpandedTileIds.add(tile.id);
-  const activeTileCountBeforeChildren = activeTiles.length;
-  childTiles.forEach((childTile) => {
-    collectActiveTiles(
-      childTile,
-      recordsById,
-      map,
-      mapCenter,
-      useAccumulatedLod,
-      activeTiles,
-      nextExpandedTileIds,
-    );
-  });
-
-  if (!useAccumulatedLod && activeTiles.length === activeTileCountBeforeChildren) {
-    activeTiles.push(tile);
-  }
-}
-
 function shouldExpandTile(tile, map, mapCenter) {
   const wasExpanded = currentExpandedTileIds.has(tile.id);
-  const metersPerPixel = getApproxMetersPerPixel(map, mapCenter);
-  const screenDiagonal =
-    Number.isFinite(metersPerPixel) && metersPerPixel > 0
-      ? tile.diagonalMeters / metersPerPixel
-      : 0;
-  const screenThreshold =
-    pointCloudConfig.fullResolutionScreenDiagonalPixels *
+  const angularDiagonalDegrees = getTileAngularDiagonalDegrees(
+    tile,
+    map,
+    mapCenter,
+  );
+  const angularThresholdDegrees =
+    pointCloudConfig.fullResolutionAngularDiagonalDegrees *
     (wasExpanded ? 1 - pointCloudConfig.tileCollapseHysteresisRatio : 1);
 
-  if (screenDiagonal >= screenThreshold) {
-    return true;
-  }
-
-  const distanceMeters = getTileDistanceMeters(tile, mapCenter);
-  const expandDistance = tile.diagonalMeters;
-  const collapseDistance =
-    tile.diagonalMeters * (1 + pointCloudConfig.tileCollapseHysteresisRatio);
-
-  return wasExpanded
-    ? distanceMeters <= collapseDistance
-    : distanceMeters < expandDistance;
+  return angularDiagonalDegrees >= angularThresholdDegrees;
 }
 
-function isTileVisibleInMap(tile, map) {
-  const visibleBounds = getMapMetricBoundsForTile(map, tile);
+function getTileAngularDiagonalDegrees(tile, map, mapCenter) {
+  const diagonalMeters = getTileDiagonalMeters(tile);
+  const distanceMeters = getTileDistanceMeters(tile, mapCenter, map);
 
-  if (!visibleBounds) {
-    return true;
+  if (!Number.isFinite(diagonalMeters) || diagonalMeters <= 0) {
+    return 0;
   }
 
-  return boundsIntersect(tile.bounds, visibleBounds);
+  if (distanceMeters === 0) {
+    return Infinity;
+  }
+
+  if (!Number.isFinite(distanceMeters) || distanceMeters < 0) {
+    return 0;
+  }
+
+  const angularDiagonalRadians =
+    2 * Math.atan(diagonalMeters / (2 * distanceMeters));
+
+  return angularDiagonalRadians * (180 / Math.PI);
 }
 
-function getMapMetricBoundsForTile(map, tile) {
-  const bounds = map?.getBounds?.();
+function isTileLoadableInMap(tile, map, mapCenter) {
+  return !isTileCompletelyBehindMapCamera(tile, map, mapCenter);
+}
 
-  if (!bounds) {
-    return null;
-  }
-
-  const corners = [
-    [bounds.getWest(), bounds.getSouth()],
-    [bounds.getWest(), bounds.getNorth()],
-    [bounds.getEast(), bounds.getSouth()],
-    [bounds.getEast(), bounds.getNorth()],
-  ];
-  const points = corners
-    .map(([lng, lat]) => projectLngLatToTileMetric(lng, lat, tile))
-    .filter(Boolean);
-
-  if (!points.length) {
-    return null;
-  }
-
-  return points.reduce(
-    (accumulator, point) => ({
-      minX: Math.min(accumulator.minX, point.x),
-      minY: Math.min(accumulator.minY, point.y),
-      maxX: Math.max(accumulator.maxX, point.x),
-      maxY: Math.max(accumulator.maxY, point.y),
-    }),
-    {
-      minX: Infinity,
-      minY: Infinity,
-      maxX: -Infinity,
-      maxY: -Infinity,
-    },
-  );
+function getTileCrs(tile) {
+  return currentTileCrsByFile.get(tile.fileIndex) || {
+    kind: tile.crsKind,
+    code: tile.crsCode,
+    zone: tile.crsZone,
+    northern: tile.crsNorthern,
+  };
 }
 
 function projectLngLatToTileMetric(lng, lat, tile) {
@@ -2161,12 +2611,7 @@ function projectLngLatToTileMetric(lng, lat, tile) {
     return null;
   }
 
-  const crs = currentTileCrsByFile.get(tile.fileIndex) || {
-    kind: tile.crsKind,
-    code: tile.crsCode,
-    zone: tile.crsZone,
-    northern: tile.crsNorthern,
-  };
+  const crs = getTileCrs(tile);
 
   if (crs.kind === "geographic" || crs.kind === "web-mercator") {
     return lngLatToWebMercatorMeters(lng, lat);
@@ -2184,32 +2629,72 @@ function projectLngLatToTileMetric(lng, lat, tile) {
   return lngLatToWebMercatorMeters(lng, lat);
 }
 
-function boundsIntersect(left, right) {
-  return (
-    left.minX <= right.maxX &&
-    left.maxX >= right.minX &&
-    left.minY <= right.maxY &&
-    left.maxY >= right.minY
-  );
-}
+function isTileCompletelyBehindMapCamera(tile, map, mapCenter) {
+  const pitch = map?.getPitch?.() ?? 0;
 
-function getTileDistanceMeters(tile, mapCenter) {
+  if (pitch <= 1) {
+    return false;
+  }
+
+  const cameraPosition = getApproxCameraMetricPosition(map, mapCenter, tile);
   const metricCenter = projectMapCenterToTileMetric(mapCenter, tile);
 
-  if (!metricCenter) {
+  if (!cameraPosition || !metricCenter) {
+    return false;
+  }
+
+  const forward = {
+    x: metricCenter.x - cameraPosition.x,
+    y: metricCenter.y - cameraPosition.y,
+  };
+
+  return PointScapeTileSelection.isTileCompletelyBehindCamera(tile, {
+    position: cameraPosition,
+    forward,
+  });
+}
+
+function getTileDistanceMeters(tile, mapCenter, map = window.mapLibreMap) {
+  const cameraPosition = getApproxCameraMetricPosition(map, mapCenter, tile);
+
+  if (!cameraPosition) {
     return Infinity;
   }
 
   const horizontalDistanceMeters = getPointToBoundsDistanceMeters(
-    metricCenter,
+    cameraPosition,
     tile.bounds,
   );
-  const verticalDistanceMeters = getCameraToTileVerticalDistanceMeters(
-    mapCenter,
+  const verticalDistanceMeters = getPointToTileVerticalDistanceMeters(
+    cameraPosition,
     tile,
   );
 
   return Math.hypot(horizontalDistanceMeters, verticalDistanceMeters);
+}
+
+function getApproxCameraMetricPosition(map, mapCenter, tile) {
+  const metricCenter = projectMapCenterToTileMetric(mapCenter, tile);
+
+  if (!metricCenter) {
+    return null;
+  }
+
+  const z = getApproxCameraAltitudeMeters(mapCenter, map);
+  const pitchRadians = ((map?.getPitch?.() ?? 0) * Math.PI) / 180;
+  const bearingRadians = ((map?.getBearing?.() ?? 0) * Math.PI) / 180;
+  const groundOffsetMeters =
+    Number.isFinite(z) && z > 0 ? z * Math.tan(pitchRadians) : 0;
+
+  if (!Number.isFinite(groundOffsetMeters) || groundOffsetMeters <= 0) {
+    return { ...metricCenter, z };
+  }
+
+  return {
+    x: metricCenter.x - Math.sin(bearingRadians) * groundOffsetMeters,
+    y: metricCenter.y - Math.cos(bearingRadians) * groundOffsetMeters,
+    z,
+  };
 }
 
 function projectMapCenterToTileMetric(mapCenter, tile) {
@@ -2224,12 +2709,7 @@ function projectMapCenterToTileMetric(mapCenter, tile) {
     return null;
   }
 
-  const crs = currentTileCrsByFile.get(tile.fileIndex) || {
-    kind: tile.crsKind,
-    code: tile.crsCode,
-    zone: tile.crsZone,
-    northern: tile.crsNorthern,
-  };
+  const crs = getTileCrs(tile);
 
   if (crs.kind === "geographic" || crs.kind === "web-mercator") {
     return lngLatToWebMercatorMeters(lng, lat);
@@ -2264,10 +2744,9 @@ function getPointToBoundsDistanceMeters(point, bounds) {
   return Math.hypot(dx, dy);
 }
 
-function getCameraToTileVerticalDistanceMeters(mapCenter, tile) {
-  const cameraAltitudeMeters = getApproxCameraAltitudeMeters(mapCenter);
-  const minZ = Number.isFinite(tile.minZ) ? tile.minZ : 0;
-  const maxZ = Number.isFinite(tile.maxZ) ? tile.maxZ : minZ;
+function getPointToTileVerticalDistanceMeters(point, tile) {
+  const cameraAltitudeMeters = Number.isFinite(point?.z) ? point.z : 0;
+  const { minZ, maxZ } = getTileVerticalBounds(tile);
 
   if (cameraAltitudeMeters < minZ) {
     return minZ - cameraAltitudeMeters;
@@ -2280,24 +2759,82 @@ function getCameraToTileVerticalDistanceMeters(mapCenter, tile) {
   return 0;
 }
 
-function getApproxCameraAltitudeMeters(mapCenter) {
-  if (!window.mapLibreMap || !mapCenter) {
+function getTileVerticalBounds(tile) {
+  const boundsMinZ = tile?.bounds?.minZ;
+  const boundsMaxZ = tile?.bounds?.maxZ;
+  const tileMinZ = tile?.minZ;
+  const tileMaxZ = tile?.maxZ;
+  const minZ = Number.isFinite(boundsMinZ)
+    ? boundsMinZ
+    : Number.isFinite(tileMinZ)
+      ? tileMinZ
+      : 0;
+  const maxZ = Number.isFinite(boundsMaxZ)
+    ? boundsMaxZ
+    : Number.isFinite(tileMaxZ)
+      ? tileMaxZ
+      : minZ;
+
+  return {
+    minZ: Math.min(minZ, maxZ),
+    maxZ: Math.max(minZ, maxZ),
+  };
+}
+
+function getTileDiagonalMeters(tile) {
+  const bounds = tile?.bounds;
+
+  if (!bounds) {
+    return Number.isFinite(tile?.diagonalMeters) ? tile.diagonalMeters : 0;
+  }
+
+  const { minZ, maxZ } = getTileVerticalBounds(tile);
+  const diagonalMeters = Math.hypot(
+    bounds.maxX - bounds.minX,
+    bounds.maxY - bounds.minY,
+    maxZ - minZ,
+  );
+
+  return Number.isFinite(diagonalMeters) && diagonalMeters > 0
+    ? diagonalMeters
+    : Number.isFinite(tile?.diagonalMeters)
+      ? tile.diagonalMeters
+      : 0;
+}
+
+function getApproxCameraAltitudeMeters(mapCenter, map = window.mapLibreMap) {
+  if (!map || !mapCenter) {
     return 0;
   }
 
-  const lat = Number.isFinite(mapCenter.lat) ? mapCenter.lat : mapCenter[1];
-  const pitch = window.mapLibreMap.getPitch?.() ?? 0;
-  const viewportHeight = Math.max(
-    window.mapLibreMap.getContainer?.()?.clientHeight || window.innerHeight || 900,
-    1,
-  );
-  const metersPerPixel = getApproxMetersPerPixel(window.mapLibreMap, mapCenter);
-  const fovRadians = 36.87 * (Math.PI / 180);
+  const pitch = map.getPitch?.() ?? 0;
+  const viewportHeight = getMapViewportHeightPixels(map);
+  const metersPerPixel = getApproxMetersPerPixel(map, mapCenter);
+  const fovRadians = getMapVerticalFovRadians(map);
   const pitchRadians = pitch * (Math.PI / 180);
   const pitchExpansion = 1 / Math.max(Math.cos(pitchRadians), 0.28);
   const visibleMeters = metersPerPixel * viewportHeight;
 
   return visibleMeters / (2 * Math.tan(fovRadians / 2) * pitchExpansion);
+}
+
+function getMapViewportHeightPixels(map) {
+  return Math.max(
+    map?.getContainer?.()?.clientHeight || window.innerHeight || 900,
+    1,
+  );
+}
+
+function getMapVerticalFovRadians(map) {
+  const transformFov = map?.transform?.fov;
+
+  if (Number.isFinite(transformFov) && transformFov > 0) {
+    return transformFov > Math.PI
+      ? transformFov * (Math.PI / 180)
+      : transformFov;
+  }
+
+  return 36.87 * (Math.PI / 180);
 }
 
 function getApproxMetersPerPixel(map, mapCenter) {
@@ -2363,8 +2900,11 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
       title: "LOD",
       rows: [
         [
-          "Screen threshold",
-          `${formatInteger(pointCloudConfig.fullResolutionScreenDiagonalPixels)} px`,
+          "Angular threshold",
+          `${formatNumber(
+            pointCloudConfig.fullResolutionAngularDiagonalDegrees,
+            2,
+          )} deg`,
         ],
         [
           "Hysteresis",
@@ -2742,9 +3282,13 @@ async function loadLasFiles(files) {
     currentPointCloudTiles = [];
     currentActiveTileIds = new Set();
     currentExpandedTileIds = new Set();
+    currentPendingDetailTileIds = new Set();
     currentTileIndex = [];
     currentTileCrsByFile = new Map();
-    window.pointCloudLayer.setPoints([], window.mapLibreMap);
+    window.pointCloudLayer.setTiles([], window.mapLibreMap, {
+      forceRebuild: true,
+    });
+    updateDetailBoxesLayer();
     updateBlockBoundsLayer([]);
     renderPointCloudStats();
     let allTiles = [];
@@ -3928,7 +4472,7 @@ function createTileRecord(tile, tileStates, fileName, crs) {
     crsNorthern: crs.northern ?? null,
     depth: tile.depth,
     bounds: tile.bounds,
-    diagonalMeters: tile.diagonalMeters,
+    diagonalMeters: getTileDiagonalMeters(tile),
     originalPointCount: tile.originalPointCount,
     fullPointCount: tile.fullPointCount,
     sourcePointCount: Math.max(
@@ -3972,7 +4516,14 @@ function createTileMetadataRecord(tileRecord) {
 }
 
 function getBoundsDiagonalMeters(bounds) {
-  return Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+  const minZ = Number.isFinite(bounds.minZ) ? bounds.minZ : 0;
+  const maxZ = Number.isFinite(bounds.maxZ) ? bounds.maxZ : minZ;
+
+  return Math.hypot(
+    bounds.maxX - bounds.minX,
+    bounds.maxY - bounds.minY,
+    maxZ - minZ,
+  );
 }
 
 function getTileQuadrant(point, bounds) {
