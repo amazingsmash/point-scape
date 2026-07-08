@@ -1,4 +1,4 @@
-const lasPalmas = {
+﻿const lasPalmas = {
   name: "Las Palmas de Gran Canaria",
   coordinates: [-15.4363, 28.1235],
 };
@@ -122,8 +122,91 @@ let currentPendingDetailTileIds = new Set();
 let currentTileIndex = [];
 let currentTileCrsByFile = new Map();
 let pointCloudTileRefreshId = 0;
-let volatileTileDbPromise = null;
 let currentPointCloudStats = null;
+
+const pointscapeTileStore = new PointScapeDataIngestion.VolatileTileStore({
+  ...volatileTileDbConfig,
+  getBatchSize: () => pointCloudConfig.indexedDbWriteBatchSize,
+  yieldToBrowser: () => yieldToBrowser(),
+});
+const pointscapeLasIngestion = new PointScapeDataIngestion.LasDataIngestionService({
+  getConfig: () => ({
+    tileSamplePoints: pointCloudConfig.tileSamplePoints,
+    m3noGridCellsPerAxis: pointCloudConfig.m3noGridCellsPerAxis,
+    tileMinDiagonalMeters: pointCloudConfig.tileMinDiagonalMeters,
+    tileMaxDepth: pointCloudConfig.tileMaxDepth,
+    parseYieldEveryPoints: pointCloudConfig.parseYieldEveryPoints,
+    progressiveLoadingPreview: pointCloudConfig.progressiveLoadingPreview,
+    progressiveTilePointInterval: pointCloudConfig.progressiveTilePointInterval,
+    progressiveTileMinimumMs: pointCloudConfig.progressiveTileMinimumMs,
+    indexedDbWriteBatchSize: pointCloudConfig.indexedDbWriteBatchSize,
+  }),
+});
+const pointscapeLodSystem = new PointScapeLodSystem({
+  config: pointCloudConfig,
+  tileSelection: PointScapeTileSelection,
+  getSummary: () => currentPointCloudSummary,
+  getCrsByFile: () => currentTileCrsByFile,
+  lngLatToWebMercatorMeters,
+  lngLatToUtm,
+});
+const pointscapeUiController = new PointScapeUiController({
+  elements: {
+    menuToggle,
+    menuContent,
+    baseLayerInputs,
+    terrainToggle,
+    pitchControl,
+    pitchValue,
+    terrainExaggerationControl,
+    terrainExaggerationValue,
+    pointOffsetControl,
+    pointOffsetValue,
+    pointSizeControl,
+    pointSizeValue,
+    fullResolutionToggle,
+    blockBoundsToggle,
+    blockDetailsToggle,
+    lodDetailBoxesToggle,
+    lodScreenDiagonalControl,
+    lodHysteresisControl,
+    tileMinDiagonalControl,
+    tileMaxDepthControl,
+    depthBiasControl,
+    depthBiasValue,
+    randomizeClassificationColorsButton,
+    lasFileInput,
+    lasDrop,
+    lasStatus,
+    flyToPointCloudButton,
+  },
+  actions: {
+    config: pointCloudConfig,
+    getMap: () => window.mapLibreMap,
+    renderClassificationLegend,
+    syncLodControlsFromConfig,
+    renderPointCloudStats,
+    setBaseLayer,
+    setElevationEnabled,
+    getTerrainExaggeration,
+    applyTerrainExaggeration,
+    refreshPointCloudElevation,
+    refreshTileBounds,
+    updateDetailBoxesLayer,
+    getPointCloudOffsetMeters,
+    getPointSizePixels,
+    setBlockBoundsVisible,
+    setBlockDetailsVisible,
+    randomizeLasClassColors,
+    applyPointCloudTileSelection,
+    readNumericControl,
+    updateLodControlLabels,
+    getDepthBias,
+    getLasFiles,
+    loadLasFiles,
+    flyToCurrentPointCloud,
+  },
+});
 
 function scheduleSplashDismiss() {
   if (!splashScreen) {
@@ -1362,167 +1445,8 @@ function createShader(gl, type, source) {
 }
 
 function bindLayerMenu() {
-  renderClassificationLegend();
-  syncLodControlsFromConfig();
-  renderPointCloudStats();
-
-  menuToggle.addEventListener("click", () => {
-    const isOpen = menuToggle.getAttribute("aria-expanded") === "true";
-    menuToggle.setAttribute("aria-expanded", String(!isOpen));
-    menuContent.hidden = isOpen;
-  });
-
-  baseLayerInputs.forEach((input) => {
-    input.addEventListener("change", () => {
-      if (input.checked) {
-        setBaseLayer(input.value);
-      }
-    });
-  });
-
-  terrainToggle.addEventListener("change", () => {
-    setElevationEnabled(terrainToggle.checked);
-  });
-
-  pitchControl.addEventListener("input", () => {
-    const pitch = Number(pitchControl.value);
-    pitchValue.textContent = `${pitch}\u00b0`;
-    window.mapLibreMap.easeTo({
-      pitch,
-      duration: 120,
-    });
-  });
-
-  terrainExaggerationControl.addEventListener("input", () => {
-    const exaggeration = getTerrainExaggeration();
-    terrainExaggerationValue.textContent = `${exaggeration.toFixed(1)}x`;
-
-    if (terrainToggle.checked) {
-      applyTerrainExaggeration();
-      refreshPointCloudElevation();
-      refreshTileBounds();
-      updateDetailBoxesLayer();
-    }
-  });
-
-  pointOffsetControl.addEventListener("input", () => {
-    const offset = getPointCloudOffsetMeters();
-    pointOffsetValue.textContent = `${offset.toFixed(offset % 1 ? 1 : 0)} m`;
-    refreshPointCloudElevation();
-    refreshTileBounds();
-    updateDetailBoxesLayer();
-  });
-
-  pointSizeControl.addEventListener("input", () => {
-    const size = getPointSizePixels();
-    pointSizeValue.textContent = `${size.toFixed(size % 1 ? 1 : 0)} px`;
-    window.mapLibreMap?.triggerRepaint();
-  });
-
-  blockBoundsToggle.addEventListener("change", () => {
-    setBlockBoundsVisible(blockBoundsToggle.checked);
-    renderPointCloudStats();
-  });
-
-  blockDetailsToggle.addEventListener("change", () => {
-    setBlockDetailsVisible(blockDetailsToggle.checked);
-  });
-
-  lodDetailBoxesToggle?.addEventListener("change", () => {
-    updateDetailBoxesLayer();
-  });
-
-  randomizeClassificationColorsButton?.addEventListener("click", () => {
-    randomizeLasClassColors();
-  });
-
-  fullResolutionToggle.addEventListener("change", () => {
-    applyPointCloudTileSelection({ updateStatus: true });
-  });
-
-  lodScreenDiagonalControl?.addEventListener("input", () => {
-    pointCloudConfig.fullResolutionAngularDiagonalDegrees = readNumericControl(
-      lodScreenDiagonalControl,
-      pointCloudConfig.fullResolutionAngularDiagonalDegrees,
-    );
-    updateLodControlLabels();
-    applyPointCloudTileSelection({ updateStatus: true });
-  });
-
-  lodHysteresisControl?.addEventListener("input", () => {
-    pointCloudConfig.tileCollapseHysteresisRatio = readNumericControl(
-      lodHysteresisControl,
-      pointCloudConfig.tileCollapseHysteresisRatio,
-    );
-    updateLodControlLabels();
-    applyPointCloudTileSelection({ updateStatus: true });
-  });
-
-  tileMinDiagonalControl?.addEventListener("change", () => {
-    pointCloudConfig.tileMinDiagonalMeters = Math.max(
-      1,
-      Math.round(
-        readNumericControl(
-          tileMinDiagonalControl,
-          pointCloudConfig.tileMinDiagonalMeters,
-        ),
-      ),
-    );
-    tileMinDiagonalControl.value = String(pointCloudConfig.tileMinDiagonalMeters);
-    renderPointCloudStats();
-  });
-
-  tileMaxDepthControl?.addEventListener("change", () => {
-    pointCloudConfig.tileMaxDepth = Math.max(
-      1,
-      Math.round(
-        readNumericControl(tileMaxDepthControl, pointCloudConfig.tileMaxDepth),
-      ),
-    );
-    tileMaxDepthControl.value = String(pointCloudConfig.tileMaxDepth);
-    renderPointCloudStats();
-  });
-
-  depthBiasControl.addEventListener("input", () => {
-    depthBiasValue.textContent = getDepthBias().toFixed(4);
-    window.mapLibreMap?.triggerRepaint();
-  });
-
-  lasFileInput.addEventListener("change", () => {
-    const files = getLasFiles(lasFileInput.files);
-    if (files.length) {
-      loadLasFiles(files);
-    }
-  });
-
-  ["dragenter", "dragover"].forEach((eventName) => {
-    lasDrop.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      lasDrop.classList.add("is-dragging");
-    });
-  });
-
-  ["dragleave", "drop"].forEach((eventName) => {
-    lasDrop.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      lasDrop.classList.remove("is-dragging");
-    });
-  });
-
-  lasDrop.addEventListener("drop", (event) => {
-    const files = getLasFiles(event.dataTransfer.files);
-    if (files.length) {
-      loadLasFiles(files);
-    } else {
-      lasStatus.textContent = "Drop one or more files with the .las extension.";
-    }
-  });
-
-  flyToPointCloudButton.addEventListener("click", () => {
-    flyToCurrentPointCloud();
-  });
+  pointscapeUiController.bind();
 }
-
 function setBaseLayer(baseLayer) {
   const map = window.mapLibreMap;
   const isSatellite = baseLayer === "satellite";
@@ -1959,99 +1883,23 @@ function getLasFiles(fileList) {
 }
 
 function resetVolatileTileDb() {
-  if (!("indexedDB" in window)) {
-    volatileTileDbPromise = Promise.resolve(null);
-    return volatileTileDbPromise;
-  }
-
-  volatileTileDbPromise = new Promise((resolve, reject) => {
-    const deleteRequest = indexedDB.deleteDatabase(volatileTileDbConfig.name);
-
-    deleteRequest.onerror = () => reject(deleteRequest.error);
-    deleteRequest.onblocked = () => {
-      console.warn("The volatile tile database reset is blocked by another tab.");
-    };
-    deleteRequest.onsuccess = () => {
-      openVolatileTileDb().then(resolve, reject);
-    };
-  });
-
-  return volatileTileDbPromise;
+  return pointscapeTileStore.reset();
 }
 
 function openVolatileTileDb() {
-  return new Promise((resolve, reject) => {
-    const openRequest = indexedDB.open(
-      volatileTileDbConfig.name,
-      volatileTileDbConfig.version,
-    );
-
-    openRequest.onerror = () => reject(openRequest.error);
-    openRequest.onupgradeneeded = () => {
-      const db = openRequest.result;
-
-      if (!db.objectStoreNames.contains(volatileTileDbConfig.storeName)) {
-        db.createObjectStore(volatileTileDbConfig.storeName, {
-          keyPath: "id",
-        });
-      }
-    };
-    openRequest.onsuccess = () => {
-      const db = openRequest.result;
-
-      db.onversionchange = () => {
-        db.close();
-        volatileTileDbPromise = null;
-      };
-
-      resolve(db);
-    };
-  });
+  return pointscapeTileStore.open();
 }
 
 async function getVolatileTileDb() {
-  if (!volatileTileDbPromise) {
-    volatileTileDbPromise = openVolatileTileDb();
-  }
-
-  return volatileTileDbPromise;
+  return pointscapeTileStore.getDb();
 }
 
 async function clearVolatileTileDb() {
-  const db = await getVolatileTileDb();
-
-  if (!db) {
-    return;
-  }
-
-  await runTileStoreTransaction("readwrite", (store) => store.clear());
+  return pointscapeTileStore.clear();
 }
 
 async function saveTileRecords(tileRecords) {
-  const db = await getVolatileTileDb();
-
-  if (!db || !tileRecords.length) {
-    return;
-  }
-
-  for (
-    let startIndex = 0;
-    startIndex < tileRecords.length;
-    startIndex += pointCloudConfig.indexedDbWriteBatchSize
-  ) {
-    const batch = tileRecords.slice(
-      startIndex,
-      startIndex + pointCloudConfig.indexedDbWriteBatchSize,
-    );
-
-    await runTileStoreTransaction("readwrite", (store) => {
-      batch.forEach((record) => {
-        store.put(serializeTileRecordForStorage(record));
-      });
-    });
-    batch.forEach(stripTileRecordPointPayload);
-    await yieldToBrowser();
-  }
+  return pointscapeTileStore.saveRecords(tileRecords);
 }
 
 function serializeTileRecordForStorage(record) {
@@ -2164,82 +2012,15 @@ function stripTileRecordPointPayload(record) {
 }
 
 async function getStoredTileRecord(tileKey) {
-  const db = await getVolatileTileDb();
-
-  if (!db) {
-    return null;
-  }
-
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(
-      volatileTileDbConfig.storeName,
-      "readonly",
-    );
-    const store = transaction.objectStore(volatileTileDbConfig.storeName);
-    const request = store.get(tileKey);
-
-    request.onsuccess = () =>
-      resolve(request.result ? hydrateStoredTileRecord(request.result) : null);
-    request.onerror = () => reject(request.error);
-  });
+  return pointscapeTileStore.getRecord(tileKey);
 }
 
 async function getStoredTileRecords(tileIds) {
-  const db = await getVolatileTileDb();
-
-  if (!db || !tileIds.length) {
-    return [];
-  }
-
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(
-      volatileTileDbConfig.storeName,
-      "readonly",
-    );
-    const store = transaction.objectStore(volatileTileDbConfig.storeName);
-    const records = [];
-    let pending = tileIds.length;
-
-    tileIds.forEach((tileId) => {
-      const request = store.get(tileId);
-
-      request.onsuccess = () => {
-        if (request.result) {
-          records.push(hydrateStoredTileRecord(request.result));
-        }
-        pending -= 1;
-        if (pending === 0) {
-          resolve(records);
-        }
-      };
-      request.onerror = () => reject(request.error);
-    });
-  });
+  return pointscapeTileStore.getRecords(tileIds);
 }
 
 function runTileStoreTransaction(mode, operation) {
-  return getVolatileTileDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        if (!db) {
-          resolve();
-          return;
-        }
-
-        const transaction = db.transaction(
-          volatileTileDbConfig.storeName,
-          mode,
-        );
-        const store = transaction.objectStore(
-          volatileTileDbConfig.storeName,
-        );
-
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-        operation(store);
-      }),
-  );
+  return pointscapeTileStore.runTransaction(mode, operation);
 }
 
 window.pointscapeTileDb = {
@@ -2541,18 +2322,10 @@ function forEachPointInSet(pointSet, callback) {
 }
 
 function selectActiveTiles(records, map) {
-  const mapCenter = map?.getCenter?.();
-  const useAccumulatedLod = currentPointCloudSummary?.indexingMode === "m3no";
-  const { activeTiles, nextExpandedTileIds } =
-    PointScapeTileSelection.selectActiveTiles(records, {
-      useAccumulatedLod,
-      previousExpandedTileIds: currentExpandedTileIds,
-      isTileVisible: (tile) => isTileLoadableInMap(tile, map, mapCenter),
-      shouldExpandTile: (tile) => shouldExpandTile(tile, map, mapCenter),
-    });
+  const activeTiles = pointscapeLodSystem.selectActiveTiles(records, map);
 
-  currentExpandedTileIds = nextExpandedTileIds;
-  currentActiveTileIds = new Set(activeTiles.map((tile) => tile.id));
+  currentExpandedTileIds = pointscapeLodSystem.expandedTileIds;
+  currentActiveTileIds = pointscapeLodSystem.activeTileIds;
 
   return activeTiles;
 }
@@ -3283,6 +3056,7 @@ async function loadLasFiles(files) {
     currentActiveTileIds = new Set();
     currentExpandedTileIds = new Set();
     currentPendingDetailTileIds = new Set();
+    pointscapeLodSystem.reset();
     currentTileIndex = [];
     currentTileCrsByFile = new Map();
     window.pointCloudLayer.setTiles([], window.mapLibreMap, {
@@ -3720,15 +3494,7 @@ function getPointCloudCenter(points) {
 }
 
 async function parseLasPointCloud(buffer, options = {}) {
-  if (typeof Worker !== "undefined") {
-    return parseLasPointCloudInWorker(buffer, options);
-  }
-
-  if (options.indexingMode === "m3no") {
-    return parseLasPointCloudM3no(buffer, options);
-  }
-
-  return parseLasPointCloudQuadtree(buffer, options);
+  return pointscapeLasIngestion.parse(buffer, options);
 }
 
 function parseLasPointCloudInWorker(buffer, options = {}) {
@@ -5083,3 +4849,5 @@ async function start() {
 }
 
 start();
+
+

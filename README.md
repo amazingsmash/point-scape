@@ -75,8 +75,14 @@ LAS files are processed locally in the browser. They are not uploaded to any ser
 .
 |-- index.html               # Interface structure
 |-- styles.css               # Visual styles and responsive layout
-|-- script.js                # Main map, LAS viewer, and UI logic
-|-- las-index.worker.js      # Worker for LAS indexing/processing
+|-- script.js                # Application composition, map setup, rendering, and compatibility wrappers
+|-- pointscape-ui-controller.js     # UI event binding and action routing
+|-- pointscape-data-ingestion.js    # LAS worker orchestration and volatile tile storage
+|-- pointscape-octree-builder.js    # QuadTree/M3NO construction used by the worker
+|-- pointscape-lod-system.js        # Active node selection and LOD state
+|-- tile-selection.js        # Pure tile traversal and camera-culling helpers
+|-- las-index.worker.js      # Thin worker transport for LAS indexing/processing
+|-- ARCHITECTURE.md          # Living architecture notes for ongoing refactors
 |-- server.js                # Local static server in Node.js
 |-- package.json             # Start script
 |-- lanzar.cmd               # Windows launcher
@@ -91,11 +97,13 @@ The application is deliberately simple to deploy: `server.js` serves static file
 The main flow is:
 
 1. `index.html` loads the interface and styles.
-2. `script.js` loads MapLibre GL JS and Proj4 when needed.
-3. The map initializes centered on Las Palmas de Gran Canaria.
-4. When LAS files are loaded, the worker processes points, classifications, bounds, and metadata.
-5. Data is organized into tiles/nodes so the viewer can decide which points to render based on camera state, distance, and LOD thresholds.
-6. A custom WebGL layer renders the point cloud above the map.
+2. `script.js` composes the application classes and loads MapLibre GL JS.
+3. `PointScapeUiController` binds controls and forwards user actions.
+4. When LAS files are loaded, `LasDataIngestionService` sends them to the worker.
+5. `PointScapeOctreeBuilder` builds QuadTree or M3NO node records inside the worker.
+6. `VolatileTileStore` keeps tile payloads in a temporary IndexedDB database.
+7. `PointScapeLodSystem` selects active nodes from camera state, distance, and LOD thresholds.
+8. A custom WebGL layer renders the point cloud above the map.
 
 The application uses a volatile IndexedDB database (`pointscape-volatile-tiles`) to manage tiles during the current session. This information is temporary and is rebuilt when data is loaded again.
 
@@ -142,8 +150,12 @@ The project does not use a bundler or frontend framework. To modify it:
 
 - Edit `index.html` for structural changes.
 - Edit `styles.css` for visual changes.
-- Edit `script.js` for map, UI, and rendering logic.
-- Edit `las-index.worker.js` for indexing or intensive processing changes.
+- Edit `script.js` for composition, map setup, and rendering logic.
+- Edit `pointscape-ui-controller.js` for interface event binding.
+- Edit `pointscape-data-ingestion.js` for LAS ingestion or temporary tile storage.
+- Edit `pointscape-octree-builder.js` for QuadTree/M3NO indexing logic.
+- Edit `pointscape-lod-system.js` for active node selection and LOD policy.
+- Edit `las-index.worker.js` only for worker message transport.
 
 After touching JavaScript, a useful quick check is:
 
