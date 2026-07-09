@@ -36,7 +36,9 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   padding: clamp(28px, 5vw, 64px);
   background: #ffffff;
   color: #113755;
@@ -93,8 +95,14 @@ body {
 
 .splash-signature {
   position: absolute;
-  right: clamp(20px, 4vw, 52px);
-  bottom: clamp(18px, 3.5vw, 44px);
+  right: max(
+    clamp(20px, 4vw, 52px),
+    calc(env(safe-area-inset-right, 0px) + 20px)
+  );
+  bottom: max(
+    clamp(18px, 3.5vw, 44px),
+    calc(env(safe-area-inset-bottom, 0px) + 16px)
+  );
   max-width: min(380px, calc(100vw - 40px));
   margin: 0;
   color: #597083;
