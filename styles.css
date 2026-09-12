@@ -703,3 +703,67 @@ body {
     max-height: calc(100vh - 142px);
   }
 }
+.js-console-toggle {
+  position: fixed;
+  left: max(16px, env(safe-area-inset-left));
+  bottom: max(32px, env(safe-area-inset-bottom));
+  z-index: 20;
+}
+
+.js-console-toggle,
+.js-console-header button {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid #526579;
+  border-radius: 8px;
+  background: #172332;
+  color: #f3f7fc;
+  font: 600 14px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.js-console {
+  position: fixed;
+  z-index: 30;
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(84px, calc(env(safe-area-inset-bottom) + 56px));
+  height: min(420px, 60dvh);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #526579;
+  border-radius: 12px;
+  background: #101923;
+  color: #e1e9f3;
+  box-shadow: 0 12px 40px #0006;
+}
+
+.js-console[hidden] { display: none; }
+.js-console-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid #526579;
+  font: 14px system-ui, sans-serif;
+}
+.js-console-header strong { flex: 1; }
+.js-console-output {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  font: 12px/1.5 ui-monospace, monospace;
+}
+.js-console-entry {
+  margin: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid #ffffff12;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+}
+.js-console-warn { color: #ffdb88; }
+.js-console-error { color: #ffa6a6; }

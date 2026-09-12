@@ -39,6 +39,7 @@ const pointCloudConfig = {
   progressiveTilePointInterval: 100000,
   progressiveTileMinimumMs: 300,
   indexedDbWriteBatchSize: 24,
+  residentPointBudget: 500000,
   flyToClearanceMeters: 1000,
 };
 
@@ -98,6 +99,8 @@ const lodScreenDiagonalControl = document.querySelector(
 const lodScreenDiagonalValue = document.querySelector("#lod-screen-diagonal-value");
 const lodHysteresisControl = document.querySelector("#lod-hysteresis-control");
 const lodHysteresisValue = document.querySelector("#lod-hysteresis-value");
+const lodPointBudgetControl = document.querySelector("#lod-point-budget-control");
+const lodPointBudgetValue = document.querySelector("#lod-point-budget-value");
 const tileMinDiagonalControl = document.querySelector("#tile-min-diagonal-control");
 const tileMaxDepthControl = document.querySelector("#tile-max-depth-control");
 const depthBiasControl = document.querySelector("#depth-bias-control");
@@ -170,6 +173,8 @@ const pointscapeUiController = new PointScapeUiController({
     lodDetailBoxesToggle,
     lodScreenDiagonalControl,
     lodHysteresisControl,
+    lodPointBudgetControl,
+    lodPointBudgetValue,
     tileMinDiagonalControl,
     tileMaxDepthControl,
     depthBiasControl,
@@ -342,9 +347,22 @@ function initMap() {
     window.mapLibreMap.resize();
   });
 
+  window.mapLibreMap.on("render", () => {
+    if (window.mapLibreMap.isMoving()) schedulePointCloudTileRefresh();
+  });
+
   window.mapLibreMap.on("moveend", () => {
     refreshTileBounds();
     schedulePointCloudTileRefresh();
+  });
+
+  window.nodeInspector = new PointScapeNodeInspector.Controller({
+    map: window.mapLibreMap,
+    getLayer: () => window.pointCloudLayer,
+    getMetadata: (id) => currentTileIndex.find((tile) => tile.id === id),
+    getRecord: (id) => getStoredTileRecord(id),
+    project: (lng, lat, tile) => pointscapeLodSystem.projectLngLatToTileMetric(lng, lat, tile),
+    getPointSize: () => getPointSizePixels(),
   });
 
   window.mapLibreMap.addControl(
@@ -633,6 +651,7 @@ function createWebGlPointCloudLayer() {
 
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
+      this.pickMatrix = Array.from(matrix);
       gl.uniform1f(this.pointSizeLocation, getPointSizePixels());
       gl.uniform1f(this.depthBiasLocation, getDepthBias());
       setPointCloudClassColorUniforms(gl, this);
@@ -916,6 +935,7 @@ function createPointCloudTileBuffer(gl, tile, map, useTerrainElevation) {
     buffer,
     pointCount: pointBuffer.pointCount,
     anchorMercator: pointBuffer.anchorMercator,
+    pickPositions: new Float32Array(pointBuffer.data),
   };
 }
 
@@ -1830,10 +1850,20 @@ function updateLodControlLabels() {
     )} deg`;
   }
 
+  if (lodPointBudgetControl) {
+    lodPointBudgetControl.value = String(pointCloudConfig.residentPointBudget);
+  }
+
   if (lodHysteresisValue) {
     lodHysteresisValue.textContent = `${Math.round(
       pointCloudConfig.tileCollapseHysteresisRatio * 100,
     )}%`;
+  }
+
+  if (lodPointBudgetValue) {
+    lodPointBudgetValue.textContent = formatInteger(
+      pointCloudConfig.residentPointBudget,
+    );
   }
 }
 
@@ -2033,16 +2063,33 @@ function schedulePointCloudTileRefresh() {
     return;
   }
 
-  const refreshId = ++pointCloudTileRefreshId;
-
-  window.setTimeout(() => {
-    if (refreshId === pointCloudTileRefreshId) {
-      applyPointCloudTileSelection();
-    }
-  }, 80);
+  applyPointCloudTileSelection();
 }
 
-async function applyPointCloudTileSelection(options = {}) {
+let queuedTileSelection = null;
+let tileSelectionRunPromise = null;
+function applyPointCloudTileSelection(options = {}) {
+  queuedTileSelection = options;
+  if (!tileSelectionRunPromise) {
+    tileSelectionRunPromise = drainPointCloudTileSelections();
+  }
+
+  return tileSelectionRunPromise;
+}
+
+async function drainPointCloudTileSelections() {
+  try {
+    while (queuedTileSelection) {
+      const next = queuedTileSelection;
+      queuedTileSelection = null;
+      await applyPointCloudTileSelectionNow(next);
+    }
+  } finally {
+    tileSelectionRunPromise = null;
+  }
+}
+
+async function applyPointCloudTileSelectionNow(options = {}) {
   if (!window.pointCloudLayer || !window.mapLibreMap) {
     return;
   }
@@ -2148,14 +2195,10 @@ async function applyPointCloudTileSelection(options = {}) {
       )} active tile payloads...`;
     }
 
-    window.setTimeout(() => {
-      if (refreshId === pointCloudTileRefreshId) {
-        applyPointCloudTileSelection({
-          ...options,
-          retryMissingTiles: false,
-        });
-      }
-    }, 120);
+    applyPointCloudTileSelection({
+      ...options,
+      retryMissingTiles: false,
+    });
 
     if (!renderedPointCount) {
       return;
@@ -2186,6 +2229,7 @@ function getRenderableTileDescriptor(record) {
   const useFullResolution =
     isFullResolutionEnabled() &&
     isFullResolutionTile(record) &&
+    pointscapeLodSystem.shouldUseFullResolution(record, window.mapLibreMap) &&
     (getPointSetCount(record.fullPoints) || record.fullPointCount);
   const source = useFullResolution ? "full" : "sample";
   const points = useFullResolution ? record.fullPoints : record.points;
@@ -2683,6 +2727,7 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
           "Hysteresis",
           `${formatNumber(pointCloudConfig.tileCollapseHysteresisRatio * 100, 0)}%`,
         ],
+        ["Max points on screen", formatInteger(pointCloudConfig.residentPointBudget)],
         [
           "Min node diagonal",
           `${formatInteger(pointCloudConfig.tileMinDiagonalMeters)} m`,
@@ -3022,7 +3067,9 @@ function formatLngLatBounds(bounds) {
   return `${bounds.minLng.toFixed(5)}, ${bounds.minLat.toFixed(5)} / ${bounds.maxLng.toFixed(5)}, ${bounds.maxLat.toFixed(5)}`;
 }
 
+let lasLoadInProgress = false;
 async function loadLasFiles(files) {
+  if (lasLoadInProgress) return;
   if (!window.pointCloudLayer || !window.mapLibreMap) {
     lasStatus.textContent = "Wait for the map to finish loading.";
     return;
@@ -3048,6 +3095,10 @@ async function loadLasFiles(files) {
   };
   renderPointCloudStats();
 
+  lasLoadInProgress = true;
+  window.nodeInspector?.reset();
+  pointCloudTileRefreshId += 1;
+  lasFileInput.disabled = true;
   try {
     await clearVolatileTileDb();
     currentPointCloudPoints = [];
@@ -3148,11 +3199,13 @@ async function loadLasFiles(files) {
       const file = files[index];
       lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length})...`;
       const readStartedAt = performance.now();
-      const buffer = await file.arrayBuffer();
+      // Send the File handle; the worker reads bounded slices on demand.
       const readFinishedAt = performance.now();
       const indexStartedAt = performance.now();
       let receivedProgressiveTiles = false;
-      const result = await parseLasPointCloud(buffer, {
+      let lastProgressLog = 0;
+      console.info("Progressive LAS loading", { file: file.name, bytes: file.size, memoryProfile: "adaptive" });
+      const result = await parseLasPointCloud(file, {
         fileIndex: index,
         fileName: file.name,
         indexingMode,
@@ -3160,20 +3213,29 @@ async function loadLasFiles(files) {
         onMetadata: useProgressiveLoadingPreview
           ? handleProgressiveMetadata
           : undefined,
-        onTiles: useProgressiveLoadingPreview
-          ? async (tileRecords, details) => {
-              receivedProgressiveTiles = true;
-              await handleProgressiveTiles(tileRecords, details);
-            }
-          : undefined,
-        onProgress: (processed, total) => {
+        onTiles: async (tileRecords, details) => {
+          receivedProgressiveTiles = true;
+          // Persist before acknowledging: no queue of unsaved point buffers.
+          if (useProgressiveLoadingPreview) await handleProgressiveTiles(tileRecords, details);
+          else await saveTileRecords(tileRecords);
+        },
+        onProgress: (processed, total, details) => {
           const percent = Math.round((processed / total) * 100);
+          if (details) {
+            lasStatus.textContent = `Building ${indexingModeLabel} - ${percent}% saved - ${details.phase} - ${(details.scanned || 0).toLocaleString("en-US")} points in node - ${details.nodes} nodes`;
+            if (performance.now() - lastProgressLog > 2000 || details.phase === "complete") {
+              lastProgressLog = performance.now();
+              console.info("LAS progress", { percentSaved: percent, ...details });
+            }
+            return;
+          }
           lasStatus.textContent = useProgressiveLoadingPreview
             ? `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}% - ${allTiles.length.toLocaleString("en-US")} nodes visible...`
             : `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}%...`;
         },
       });
       const indexFinishedAt = performance.now();
+      console.info("LAS index saved", result.memoryProfile);
 
       const saveStartedAt = performance.now();
       if (!receivedProgressiveTiles) {
@@ -3235,6 +3297,8 @@ async function loadLasFiles(files) {
     lasStatus.textContent =
       error.message || "The LAS files could not be read.";
   } finally {
+    lasLoadInProgress = false;
+    lasFileInput.disabled = false;
     lasFileInput.value = "";
   }
 }

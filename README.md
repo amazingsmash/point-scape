@@ -71,6 +71,25 @@ LAS files are processed locally in the browser. They are not uploaded to any ser
 
 ## Project Structure
 
+### Inspect an individual node
+
+Right-click a displayed cloud point (or left-click/tap on iPad), then choose
+**Inspeccionar nodo en 3D**. The isolated view has a black background and shows
+the complete node box, so empty regions are not cropped away. Drag to orbit,
+use the wheel/pinch to zoom, or choose **Planta**, **Frontal**, and **Encajar**.
+Arrow keys rotate; plus/minus zoom. An optional **Retícula 4 × 4 × 4** divides
+the node into equal cells for visual comparison of point concentrations.
+
+The initial dataset matches the picked point's rendered node representation.
+For leaves, **Datos** switches between the node sample and all leaf points.
+Internal-node samples do not include descendant payloads; this is stated in the
+inspector. It displays original elevations without map terrain exaggeration,
+uniform XYZ scale, orthographic projection, and uniform point coloring. The
+selected point is highlighted yellow. Close or Escape returns to the map.
+This is a visual inspection tool, not an automatic statistical homogeneity test.
+
+Only one stored node is fetched; closing releases its data and WebGL resources.
+
 ```text
 .
 |-- index.html               # Interface structure
@@ -137,6 +156,32 @@ If a fully offline mode is required, those dependencies should be packaged local
 All institutional and commercial marks belong to their respective owners. This repository does not claim ownership over those marks.
 
 ## Known Limitations
+
+### Large LAS files and tablet memory
+
+File loading uses an external-memory index builder. The worker chooses a 64-256 MiB
+working tier from the browser's available device signals, reads 4-16 MiB slices,
+keeps one node's sample in memory, and writes pending partitions to a temporary
+IndexedDB database in bounded batches. Each completed node is saved before the
+worker continues. Leaves contain at most 50,000-200,000 full-resolution points
+according to that tier, including dense or coincident data. All valid source
+points remain in leaf storage.
+
+LOD expansion reserves a 500,000-point payload budget (sample plus leaf payloads)
+before fetching nodes. When refinement would exceed it, the parent representation
+remains visible. This trades immediate detail for a lower memory footprint.
+It is a payload budget, not a measurement or guarantee of total Safari RAM use.
+The **Max points on screen** slider changes this budget immediately. Camera motion
+reevaluates LOD on each rendered frame, without debounce or retry timers; IndexedDB
+and GPU work still complete asynchronously at the speed allowed by the device.
+
+Indexing needs temporary device storage. Each partition is decoded once; M3NO only
+revisits the small set of temporary blocks containing its final cell samples. A
+20,000-node guard limits metadata growth and reports an error for larger indexes.
+The **Consola JS** button reports phases, saved
+progress, and the peak accounted I/O buffer bytes; this counter excludes JavaScript
+objects, browser internals, map textures, and GPU allocations. Temporary partitions
+are cleared after completion and at the next load after a page crash.
 
 - LAS files are supported; compressed LAZ files are not currently supported.
 - Performance depends on point-cloud size, available memory, and the user's GPU.

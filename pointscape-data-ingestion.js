@@ -3,6 +3,12 @@
     constructor({ workerUrl = "./las-index.worker.js", getConfig = () => ({}) } = {}) {
       this.workerUrl = workerUrl;
       this.getConfig = getConfig;
+      try {
+        this.scratchName = sessionStorage.getItem("pointscape-scratch-name") || `pointscape-las-scratch-${Math.random().toString(36).slice(2)}`;
+        sessionStorage.setItem("pointscape-scratch-name", this.scratchName);
+      } catch {
+        this.scratchName = `pointscape-las-scratch-${Math.random().toString(36).slice(2)}`;
+      }
     }
 
     parse(buffer, options = {}) {
@@ -36,7 +42,7 @@
           }
 
           if (message.type === "progress") {
-            onProgress?.(message.processed, message.total);
+            onProgress?.(message.processed, message.total, message.details);
             return;
           }
 
@@ -46,9 +52,11 @@
           }
 
           if (message.type === "tiles") {
-            tileCallbackQueue = tileCallbackQueue.then(() =>
-              onTiles?.(message.tileRecords || [], message.details || {}),
-            );
+            tileCallbackQueue = tileCallbackQueue.then(async () => {
+              if (message.needsAck && !onTiles) throw new Error("No persistent LAS tile sink is available.");
+              await onTiles?.(message.tileRecords || [], message.details || {});
+              if (message.needsAck && !isSettled) worker.postMessage({ type: "tiles-saved" });
+            });
             tileCallbackQueue.catch((error) => {
               fail(error instanceof Error ? error : new Error(String(error)));
             });
@@ -84,11 +92,22 @@
         worker.postMessage(
           {
             type: "parse-las",
-            buffer,
-            options: workerOptions,
+            ...(buffer instanceof Blob ? { file: buffer } : { buffer }),
+            options: {
+              ...workerOptions,
+              scratchName: this.scratchName,
+              runtimeCapabilities: workerOptions.runtimeCapabilities || {
+                deviceMemoryGiB: Number.isFinite(Number(globalScope.navigator?.deviceMemory))
+                  ? Number(globalScope.navigator.deviceMemory)
+                  : null,
+                hardwareConcurrency: Number(globalScope.navigator?.hardwareConcurrency) || null,
+                mobileApple: /iPad|iPhone|iPod/.test(globalScope.navigator?.userAgent || "") ||
+                  (globalScope.navigator?.platform === "MacIntel" && globalScope.navigator?.maxTouchPoints > 1),
+              },
+            },
             config: this.getConfig(),
           },
-          [buffer],
+          buffer instanceof Blob ? [] : [buffer],
         );
       });
     }

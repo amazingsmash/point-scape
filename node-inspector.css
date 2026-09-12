@@ -1,0 +1,77 @@
+.node-inspector-menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  max-width: calc(100vw - 16px);
+  padding: 12px;
+  border: 1px solid #536277;
+  border-radius: 10px;
+  background: #101722;
+  color: #e9f0fa;
+  box-shadow: 0 8px 30px #0008;
+  font-size: 13px;
+}
+.node-inspector-menu[hidden] { display: none; }
+.node-inspector-menu span { overflow-wrap: anywhere; }
+.node-inspector-menu button,
+.node-inspector-dialog button,
+.node-inspector-dialog select {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid #536277;
+  border-radius: 7px;
+  background: #1c293a;
+  color: #f1f5fc;
+  font: inherit;
+  cursor: pointer;
+}
+.node-inspector-dialog {
+  width: min(1200px, calc(100vw - 24px));
+  height: min(900px, calc(100dvh - 24px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 1px solid #536277;
+  border-radius: 12px;
+  background: #000;
+  color: #e9f0fa;
+  overflow: hidden;
+  font: 14px/1.4 system-ui, sans-serif;
+}
+.node-inspector-dialog[open] { display: flex; flex-direction: column; }
+.node-inspector-dialog::backdrop { background: #000c; }
+.node-inspector-dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #101722;
+}
+.node-inspector-dialog header > div { min-width: 0; }
+.node-inspector-dialog h2 { margin: 0; font-size: 19px; }
+.node-inspector-info { margin: 6px 0 0; color: #bdcadb; overflow-wrap: anywhere; }
+.node-inspector-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  background: #101722;
+  border-bottom: 1px solid #26364b;
+}
+.node-inspector-tools label { display: flex; align-items: center; gap: 8px; }
+.node-inspector-tools input { width: 90px; }
+.node-inspector-tools input[type="checkbox"] { width: 18px; height: 18px; }
+.node-inspector-stage { flex: 1; min-height: 0; position: relative; background: #000; }
+.node-inspector-stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.node-inspector-dialog :focus-visible, .node-inspector-menu :focus-visible { outline: 2px solid #80c9ff; outline-offset: -2px; }
+.node-inspector-help { margin: 0; padding: 8px 16px; color: #aebbd0; font-size: 12px; background: #101722; }
+@media (max-width: 600px) {
+  .node-inspector-dialog { width: 100vw; height: 100dvh; border-radius: 0; }
+  .node-inspector-dialog header { padding: 8px; }
+  .node-inspector-tools { gap: 6px; padding: 6px 8px; }
+  .node-inspector-tools select { max-width: 210px; }
+  .node-inspector-info { font-size: 12px; }
+}

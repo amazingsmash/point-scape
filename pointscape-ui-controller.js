@@ -111,6 +111,25 @@
         actions.applyPointCloudTileSelection({ updateStatus: true });
       });
 
+      const updatePointBudget = () => {
+        actions.config.residentPointBudget = Math.max(
+          25000,
+          Math.round(
+            actions.readNumericControl(
+              elements.lodPointBudgetControl,
+              actions.config.residentPointBudget,
+            ) / 25000,
+          ) * 25000,
+        );
+        elements.lodPointBudgetControl.value = String(
+          actions.config.residentPointBudget,
+        );
+        actions.updateLodControlLabels();
+        actions.renderPointCloudStats();
+        actions.applyPointCloudTileSelection({ updateStatus: true });
+      };
+      elements.lodPointBudgetControl?.addEventListener("input", updatePointBudget);
+
       elements.tileMinDiagonalControl?.addEventListener("change", () => {
         actions.config.tileMinDiagonalMeters = Math.max(
           1,

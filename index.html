@@ -16,6 +16,7 @@
       href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.6.2/maplibre-gl.min.css"
     />
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./node-inspector.css?v=2" />
   </head>
   <body>
     <section
@@ -182,6 +183,18 @@
                     value="0.1"
                   />
                 </label>
+                <label class="camera-control" for="lod-point-budget-control">
+                  <span>Max points on screen</span>
+                  <output id="lod-point-budget-value" for="lod-point-budget-control">500,000</output>
+                  <input
+                    type="range"
+                    id="lod-point-budget-control"
+                    min="25000"
+                    max="5000000"
+                    step="25000"
+                    value="500000"
+                  />
+                </label>
                 <label class="numeric-control" for="tile-min-diagonal-control">
                   <span>Min node diagonal</span>
                   <input
@@ -298,10 +311,21 @@
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
     </main>
-    <script src="./tile-selection.js?v=1"></script>
-    <script src="./pointscape-data-ingestion.js?v=1"></script>
-    <script src="./pointscape-lod-system.js?v=1"></script>
-    <script src="./pointscape-ui-controller.js?v=1"></script>
-    <script src="./script.js?v=48"></script>
+    <button class="js-console-toggle" id="js-console-toggle" type="button" aria-expanded="false" aria-controls="js-console">Consola JS</button>
+    <section class="js-console" id="js-console" aria-label="Consola JavaScript" hidden>
+      <header class="js-console-header">
+        <strong>Consola JavaScript</strong>
+        <button id="js-console-clear" type="button">Limpiar</button>
+        <button id="js-console-close" type="button" aria-label="Cerrar consola">Cerrar</button>
+      </header>
+      <div class="js-console-output" id="js-console-output" role="region" aria-label="Mensajes de consola" tabindex="0"></div>
+    </section>
+    <script src="./js-console.js?v=1"></script>
+    <script src="./tile-selection.js?v=3"></script>
+    <script src="./pointscape-data-ingestion.js?v=2"></script>
+    <script src="./pointscape-lod-system.js?v=3"></script>
+    <script src="./pointscape-ui-controller.js?v=2"></script>
+    <script src="./node-inspector.js?v=2"></script>
+    <script src="./script.js?v=52"></script>
   </body>
 </html>

@@ -16,11 +16,13 @@
       this.lngLatToUtm = lngLatToUtm;
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
+      this.fullResolutionTileIds = new Set();
     }
 
     reset() {
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
+      this.fullResolutionTileIds = new Set();
     }
 
     selectActiveTiles(records, map) {
@@ -29,9 +31,14 @@
       const { activeTiles, nextExpandedTileIds } =
         this.tileSelection.selectActiveTiles(records, {
           useAccumulatedLod,
+          pointBudget: this.config.residentPointBudget || 500000,
+          // Storage fetches contain both payloads; reserve both before fetching.
+          getTilePointCost: (tile) => (tile.sampledPointCount || 0) +
+            (tile.childIds?.length ? 0 : tile.fullPointCount || 0),
           previousExpandedTileIds: this.expandedTileIds,
           isTileVisible: (tile) => this.isTileLoadableInMap(tile, map, mapCenter),
           shouldExpandTile: (tile) => this.shouldExpandTile(tile, map, mapCenter),
+          getTilePriority: (tile) => this.getTileAngularDiagonalDegrees(tile, map, mapCenter),
         });
 
       this.expandedTileIds = nextExpandedTileIds;
@@ -40,8 +47,14 @@
       return activeTiles;
     }
 
-    shouldExpandTile(tile, map, mapCenter) {
-      const wasExpanded = this.expandedTileIds.has(tile.id);
+    shouldUseFullResolution(tile, map) {
+      const useFull = this.shouldExpandTile(tile, map, map?.getCenter?.(), this.fullResolutionTileIds.has(tile.id));
+      if (useFull) this.fullResolutionTileIds.add(tile.id);
+      else this.fullResolutionTileIds.delete(tile.id);
+      return useFull;
+    }
+
+    shouldExpandTile(tile, map, mapCenter, wasExpanded = this.expandedTileIds.has(tile.id)) {
       const angularDiagonalDegrees = this.getTileAngularDiagonalDegrees(
         tile,
         map,
@@ -157,6 +170,25 @@
     }
 
     getApproxCameraMetricPosition(map, mapCenter, tile) {
+      // Mercator transform units: XY world pixels, altitude in meters. Derive
+      // the eye from the actual center distance, including terrain elevation.
+      const transform = map?.transform;
+      const distance = transform?.cameraToCenterDistance;
+      const worldSize = transform?.worldSize;
+      const pixelsPerMeter = transform?.pixelsPerMeter;
+      if (mapCenter && distance > 0 && worldSize > 0 && pixelsPerMeter > 0) {
+        const lat = mapCenter.lat ?? mapCenter[1];
+        const lng = mapCenter.lng ?? mapCenter[0];
+        const pitch = (map.getPitch?.() || 0) * Math.PI / 180;
+        const bearing = (map.getBearing?.() || 0) * Math.PI / 180;
+        const groundPixels = distance * Math.sin(pitch);
+        const centerY = (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2;
+        const eyeX = (lng + 180) / 360 - Math.sin(bearing) * groundPixels / worldSize;
+        const eyeY = centerY + Math.cos(bearing) * groundPixels / worldSize;
+        const eyeLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * eyeY))) * 180 / Math.PI;
+        const metric = this.projectLngLatToTileMetric(eyeX * 360 - 180, eyeLat, tile);
+        if (metric) return { ...metric, z: (transform.elevation || 0) + distance * Math.cos(pitch) / pixelsPerMeter };
+      }
       const metricCenter = this.projectMapCenterToTileMetric(mapCenter, tile);
 
       if (!metricCenter) {
@@ -276,7 +308,7 @@
       const metersPerPixel = this.getApproxMetersPerPixel(map, mapCenter);
       const fovRadians = this.getMapVerticalFovRadians(map);
       const pitchRadians = pitch * (Math.PI / 180);
-      const pitchExpansion = 1 / Math.max(Math.cos(pitchRadians), 0.28);
+      const pitchExpansion = 1 / Math.max(Math.cos(pitchRadians), 0.001);
       const visibleMeters = metersPerPixel * viewportHeight;
 
       return visibleMeters / (2 * Math.tan(fovRadians / 2) * pitchExpansion);

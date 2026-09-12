@@ -22,6 +22,11 @@
       return parseLasPointCloud(buffer, options);
     }
 
+    async parseFile(file, options = {}) {
+      pointCloudConfig = { ...defaultPointCloudConfig, ...this.config };
+      return parseLasFileProgressively(file, options);
+    }
+
     collectResultTransferList(result) {
       return collectResultTransferList(result);
     }
@@ -30,6 +35,300 @@
       return collectTileRecordTransferList(tileRecords);
     }
   }
+// External-memory construction: only one node's sample and bounded I/O buffers
+// are resident. Pending partitions live in IndexedDB, never in a point-object tree.
+async function parseLasFileProgressively(file, options) {
+  const capabilities = options.runtimeCapabilities || {};
+  const reportedMemory = Number(capabilities.deviceMemoryGiB);
+  const reportedCores = Number(capabilities.hardwareConcurrency);
+  const mobileApple = capabilities.mobileApple === true;
+  const memoryTier = mobileApple || (Number.isFinite(reportedMemory) && reportedMemory <= 2)
+    ? "compact"
+    : (Number.isFinite(reportedMemory) && reportedMemory <= 4) ||
+        (!Number.isFinite(reportedMemory) && Number.isFinite(reportedCores) && reportedCores <= 4)
+      ? "balanced"
+      : Number.isFinite(reportedMemory) && reportedMemory > 8
+        ? "large"
+        : "standard";
+  const memoryProfiles = {
+    compact: { workingSetBytes: 64 * 1024 * 1024, blockBytes: 4 * 1024 * 1024,
+      stagingBlockBytes: 512 * 1024, scratchBatchBytes: 8 * 1024 * 1024, leafPointLimit: 50000 },
+    balanced: { workingSetBytes: 96 * 1024 * 1024, blockBytes: 8 * 1024 * 1024,
+      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 12 * 1024 * 1024, leafPointLimit: 75000 },
+    standard: { workingSetBytes: 160 * 1024 * 1024, blockBytes: 12 * 1024 * 1024,
+      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 20 * 1024 * 1024, leafPointLimit: 125000 },
+    large: { workingSetBytes: 256 * 1024 * 1024, blockBytes: 16 * 1024 * 1024,
+      stagingBlockBytes: 2 * 1024 * 1024, scratchBatchBytes: 32 * 1024 * 1024, leafPointLimit: 200000 },
+  };
+  const memoryProfile = memoryProfiles[memoryTier];
+  const { blockBytes, stagingBlockBytes, scratchBatchBytes, leafPointLimit: leafLimit } = memoryProfile;
+  const prefix = new DataView(await file.slice(0, 375).arrayBuffer());
+  if (prefix.byteLength < 227 || readAscii(prefix, 0, 4) !== "LASF") {
+    throw new Error("Invalid or truncated LAS header.");
+  }
+  const header = readLasHeader(prefix, file.size);
+  const minimumRecordLengths = [20, 28, 26, 34, 57, 63, 30, 36, 38, 59, 67];
+  if (prefix.getUint8(104) & 0xc0 || header.pointFormat > 10) {
+    throw new Error("Compressed LAS/LAZ is not supported.");
+  }
+  if (!Number.isSafeInteger(header.pointCount) ||
+      header.pointRecordLength < minimumRecordLengths[header.pointFormat] ||
+      header.headerSize < 227 || header.headerSize > header.pointDataOffset ||
+      header.pointCount > Math.floor((file.size - header.pointDataOffset) / header.pointRecordLength)) {
+    throw new Error("Invalid LAS record length, point count or truncated point data.");
+  }
+  // Read only projection VLRs, skipping large padding and unrelated metadata.
+  const projectionVlrs = [];
+  let vlrOffset = header.headerSize;
+  let metadataBytes = 0;
+  for (let index = 0; index < header.vlrCount; index += 1) {
+    if (vlrOffset + 54 > header.pointDataOffset) throw new Error("Truncated LAS VLR.");
+    const vlr = new DataView(await file.slice(vlrOffset, vlrOffset + 54).arrayBuffer());
+    const length = vlr.getUint16(20, true);
+    if (vlrOffset + 54 + length > header.pointDataOffset) throw new Error("Invalid LAS VLR length.");
+    if (readAscii(vlr, 2, 16).includes("LASF_Projection")) {
+      metadataBytes += 54 + length;
+      if (metadataBytes > 2 * blockBytes) throw new Error("LAS projection metadata exceeds the bounded loading budget.");
+      projectionVlrs.push(new Uint8Array(await file.slice(vlrOffset, vlrOffset + 54 + length).arrayBuffer()));
+    }
+    vlrOffset += 54 + length;
+  }
+  const crsBytes = new Uint8Array(metadataBytes + header.pointRecordLength);
+  let offset = 0;
+  for (const vlr of projectionVlrs) { crsBytes.set(vlr, offset); offset += vlr.length; }
+  crsBytes.set(new Uint8Array(await file.slice(header.pointDataOffset, header.pointDataOffset + header.pointRecordLength).arrayBuffer()), offset);
+  const crs = detectLasCrs(new DataView(crsBytes.buffer), {
+    ...header, headerSize: 0, vlrCount: projectionVlrs.length, pointDataOffset: metadataBytes,
+  });
+  const m3no = options.indexingMode === "m3no";
+  const fileIndex = options.fileIndex || 0;
+  const bounds = m3no ? getM3noMetricBounds(header, crs) : getLasMetricBounds(header, crs);
+  const maxDepth = getQuadtreeMaxDepth(bounds);
+  const createState = m3no ? createM3noTileState : createTileState;
+  const root = createState({ id: `${fileIndex}:${m3no ? "m3no" : "r"}`, parentId: null, fileIndex, depth: 0, bounds, crs });
+  const scratch = options.scratchStore || await globalScope.PointScapeScratchStore.open(options.scratchName);
+  const stride = header.pointRecordLength + 1;
+  const recordsPerBlock = Math.max(1, Math.min(32768, Math.floor(blockBytes / header.pointRecordLength)));
+  const recordsPerStagingBlock = Math.max(1, Math.min(32768, Math.floor(stagingBlockBytes / stride)));
+  const metadata = [];
+  let validPointCount = 0;
+  let completedPoints = 0;
+  let peakBufferedBytes = 0;
+  let activeReadBytes = 0;
+  let activeWriteBatchBytes = 0;
+  const pending = [{ tile: root, blocks: 0, isRoot: true, pointCount: header.pointCount }];
+  const emitProgress = (phase, scanned = 0) => options.onProgress?.(completedPoints, header.pointCount, {
+    phase, scanned, nodes: metadata.length, blockBytes,
+    peakBufferedBytes, leafPointLimit: leafLimit, memoryTier,
+  });
+
+  const scratchGetMany = (keys) => scratch.getMany
+    ? scratch.getMany(keys)
+    : Promise.all(keys.map((key) => scratch.get(key)));
+  const scratchPutMany = async (entries) => {
+    if (scratch.putMany) await scratch.putMany(entries);
+    else for (const [key, value] of entries) await scratch.put(key, value);
+  };
+  const scratchRemoveMany = async (keys) => {
+    if (scratch.removeMany) await scratch.removeMany(keys);
+    else for (const key of keys) await scratch.remove(key);
+  };
+
+  async function* blocksFor(node) {
+    if (node.isRoot) {
+      for (let start = 0; start < header.pointCount; start += recordsPerBlock) {
+        const count = Math.min(recordsPerBlock, header.pointCount - start);
+        const buffer = await file.slice(header.pointDataOffset + start * header.pointRecordLength,
+          header.pointDataOffset + (start + count) * header.pointRecordLength).arrayBuffer();
+        activeReadBytes = buffer.byteLength;
+        yield { bytes: new Uint8Array(buffer), stride: header.pointRecordLength, count };
+        activeReadBytes = 0;
+      }
+    } else {
+      const blocksPerRead = Math.max(1, Math.floor(scratchBatchBytes / stagingBlockBytes));
+      for (let first = 0; first < node.blocks; first += blocksPerRead) {
+        const keys = [];
+        for (let index = first; index < Math.min(node.blocks, first + blocksPerRead); index += 1) {
+          keys.push(`${node.tile.id}/${index}`);
+        }
+        const buffers = await scratchGetMany(keys);
+        activeReadBytes = buffers.reduce((sum, buffer) => sum + (buffer?.byteLength || 0), 0);
+        for (let index = 0; index < buffers.length; index += 1) {
+          const buffer = buffers[index];
+          if (!buffer) throw new Error("A temporary LAS partition is missing.");
+          yield { bytes: new Uint8Array(buffer), stride, count: buffer.byteLength / stride, key: keys[index] };
+        }
+        await scratchRemoveMany(keys);
+        activeReadBytes = 0;
+      }
+    }
+  }
+  function decode(block, index) {
+    const view = new DataView(block.bytes.buffer, block.bytes.byteOffset, block.bytes.byteLength);
+    const offset = index * block.stride;
+    const x = view.getInt32(offset, true) * header.scaleX + header.offsetX;
+    const y = view.getInt32(offset + 4, true) * header.scaleY + header.offsetY;
+    const z = view.getInt32(offset + 8, true) * header.scaleZ + header.offsetZ;
+    const projected = projectLasCoordinate(x, y, z, crs);
+    if (!isValidProjectedPoint(projected) || !Number.isFinite(z)) return null;
+    return {
+      point: { lng: projected.lng, lat: projected.lat, altitudeMeters: projected.altitudeMeters,
+        classification: readLasClassification(view, offset, header.pointFormat) },
+      metric: getHorizontalMetricCoordinate(x, y, crs), altitudeMeters: z,
+      eligible: block.stride === header.pointRecordLength || block.bytes[offset + header.pointRecordLength] === 1,
+    };
+  }
+  try {
+    while (pending.length) {
+      if (metadata.length + pending.length > 20000) throw new Error("LAS index exceeds the 20,000-node metadata budget. Split the file into smaller areas.");
+      const node = pending.pop();
+      const tile = node.tile;
+      const spatialEnd = tile.depth >= maxDepth || tile.diagonalMeters <= pointCloudConfig.tileMinDiagonalMeters;
+      const leaf = node.pointCount <= leafLimit;
+      const children = new Map();
+      const writeBatch = [];
+      const selectedScratchRefs = m3no && !leaf ? new Map() : null;
+      let ordinal = 0;
+      let validOrdinal = 0;
+      function updatePeak() {
+        const stagingBytes = Array.from(children.values(), (child) => child.bytes?.byteLength || 0)
+          .reduce((sum, bytes) => sum + bytes, 0);
+        peakBufferedBytes = Math.max(peakBufferedBytes, activeReadBytes + activeWriteBatchBytes + stagingBytes);
+      }
+      async function flushWriteBatch() {
+        if (!writeBatch.length) return;
+        await scratchPutMany(writeBatch);
+        writeBatch.length = 0;
+        activeWriteBatchBytes = 0;
+      }
+      async function flush(child) {
+        if (!child.count) return;
+        const blockIndex = child.blocks++;
+        const buffer = child.bytes.buffer.slice(0, child.count * stride);
+        writeBatch.push([`${child.tile.id}/${blockIndex}`, buffer]);
+        activeWriteBatchBytes += buffer.byteLength;
+        child.count = 0;
+        updatePeak();
+        if (activeWriteBatchBytes >= scratchBatchBytes) await flushWriteBatch();
+      }
+      for await (const block of blocksFor(node)) {
+        for (let index = 0; index < block.count; index += 1, ordinal += 1) {
+          const sample = decode(block, index);
+          if (!sample) continue;
+          addPointToTileFullResolutionStats(tile, sample.altitudeMeters, sample.point.classification);
+          if (m3no) {
+            if (sample.eligible) {
+              addPointToM3noSubtreeIndex(tile, sample);
+              addPointToM3noNodeSample(tile, sample);
+            }
+          } else {
+            addPointToTileSample(tile, sample.point, sample.altitudeMeters);
+          }
+          if (leaf) {
+            tile.fullPoints.push(sample.point);
+          } else {
+            const childIndex = spatialEnd
+              ? (validOrdinal < Math.ceil(node.pointCount / 2) ? 0 : 1)
+              : m3no ? getM3noChildIndex(sample.metric, sample.altitudeMeters, tile.bounds)
+                : getTileQuadrant(sample.metric, tile.bounds);
+            let child = children.get(childIndex);
+            if (!child) {
+              const childBounds = spatialEnd ? { ...tile.bounds } : m3no
+                ? getM3noChildBounds(tile.bounds, childIndex) : getTileChildBounds(tile.bounds, childIndex);
+              child = { tile: createState({ id: `${tile.id}.${childIndex}`, parentId: tile.id,
+                fileIndex, depth: tile.depth + 1, bounds: childBounds, crs }), blocks: 0,
+                bytes: new Uint8Array(recordsPerStagingBlock * stride), count: 0, validPointCount: 0 };
+              children.set(childIndex, child);
+            }
+            const start = index * block.stride;
+            const destination = child.count * stride;
+            child.bytes.set(block.bytes.subarray(start, start + header.pointRecordLength), destination);
+            child.bytes[destination + header.pointRecordLength] = sample.eligible ? 1 : 0;
+            if (m3no && sample.eligible) {
+              const cellKey = getM3noCellKey(sample, tile.bounds);
+              const scratchRef = { child, blockIndex: child.blocks, byteOffset: destination + header.pointRecordLength };
+              const selectedSample = tile.cellSamples.get(cellKey);
+              if (selectedSample?.point === sample.point) selectedSample.scratchRef = scratchRef;
+              selectedScratchRefs.set(cellKey, true);
+            }
+            child.count += 1;
+            child.validPointCount += 1;
+            if (child.count === recordsPerStagingBlock) await flush(child);
+          }
+          validOrdinal += 1;
+        }
+        updatePeak();
+        emitProgress(leaf ? "saving" : "partitioning", ordinal);
+      }
+      if (node.isRoot) {
+        validPointCount = tile.fullPointCount;
+        if (!validPointCount) throw new Error("No valid points could be projected from the LAS file.");
+      }
+      if (m3no) finalizeM3noTileSamples(new Map([[tile.id, tile]]));
+      const states = new Map([[tile.id, tile]]);
+      for (const child of children.values()) {
+        await flush(child);
+        // Free output staging buffers before retaining only node descriptors.
+        child.bytes = null;
+        child.tile.fullPointCount = 1; // Temporary presence marker for metadata links.
+        states.set(child.tile.id, child.tile);
+        tile.childIds.push(child.tile.id);
+      }
+      await flushWriteBatch();
+      if (selectedScratchRefs?.size) {
+        const refsByKey = new Map();
+        for (const sample of tile.cellSamples.values()) {
+          const ref = sample.scratchRef;
+          if (!ref) continue;
+          const key = `${ref.child.tile.id}/${ref.blockIndex}`;
+          if (!refsByKey.has(key)) refsByKey.set(key, []);
+          refsByKey.get(key).push(ref.byteOffset);
+        }
+        const entries = Array.from(refsByKey.entries());
+        const patchesPerBatch = Math.max(1, Math.floor(scratchBatchBytes / stagingBlockBytes));
+        for (let first = 0; first < entries.length; first += patchesPerBatch) {
+          const group = entries.slice(first, first + patchesPerBatch);
+          const buffers = await scratchGetMany(group.map(([key]) => key));
+          const patched = group.map(([key, offsets], index) => {
+            if (!buffers[index]) throw new Error("A temporary LAS sample partition is missing.");
+            const bytes = new Uint8Array(buffers[index]);
+            for (const byteOffset of offsets) bytes[byteOffset] = 0;
+            return [key, bytes.buffer];
+          });
+          activeReadBytes = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+          activeWriteBatchBytes = activeReadBytes;
+          updatePeak();
+          await scratchPutMany(patched);
+          activeReadBytes = 0;
+          activeWriteBatchBytes = 0;
+        }
+      }
+      const record = createTileRecord(tile, states, options.fileName || file.name || "", crs);
+      const tileMetadata = createTileMetadataRecord(record);
+      metadata.push(tileMetadata);
+      if (node.isRoot) options.onMetadata?.({ fileIndex, crs, crsLabel: crs.label,
+        sourcePointCount: header.pointCount, rootTile: tileMetadata });
+      if (leaf) completedPoints += tile.fullPointCount;
+      if (!options.onTiles) throw new Error("Progressive LAS loading requires a persistent tile sink.");
+      await options.onTiles([record], { processed: completedPoints, total: header.pointCount, phase: "saving" });
+      tile.points = [];
+      tile.fullPoints = [];
+      tile.cellSamples?.clear();
+      for (const child of children.values()) {
+        child.tile.fullPointCount = 0;
+        pending.push({ tile: child.tile, blocks: child.blocks, isRoot: false, pointCount: child.validPointCount });
+      }
+      emitProgress("saved");
+    }
+    options.onProgress?.(header.pointCount, header.pointCount, { phase: "complete", peakBufferedBytes, nodes: metadata.length });
+    return { fileIndex, crs, crsLabel: crs.label, points: [], tiles: metadata, tileRecords: [],
+      sourcePointCount: header.pointCount, validPointCount, streamed: true,
+      memoryProfile: { ...memoryProfile, memoryTier, peakBufferedBytes, singlePassNodes: true } };
+  } finally {
+    await scratch.close();
+  }
+}
+
 function parseLasPointCloud(buffer, options = {}) {
   if (options.indexingMode === "m3no") {
     return parseLasPointCloudM3no(buffer, options);
@@ -950,7 +1249,7 @@ function readLasClassification(view, pointOffset, pointFormat) {
   return view.getUint8(pointOffset + 15) & 0x1f;
 }
 
-function readLasHeader(view) {
+function readLasHeader(view, fileSize = view.byteLength) {
   const versionMajor = view.getUint8(24);
   const versionMinor = view.getUint8(25);
   const headerSize = view.getUint16(94, true);
@@ -980,7 +1279,7 @@ function readLasHeader(view) {
     }
   }
 
-  if (!pointCount || !pointRecordLength || pointDataOffset >= view.byteLength) {
+  if (!pointCount || !pointRecordLength || pointDataOffset >= fileSize) {
     throw new Error("The LAS header does not contain valid points.");
   }
 

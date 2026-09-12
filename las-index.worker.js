@@ -1,7 +1,15 @@
 importScripts("./pointscape-octree-builder.js");
+importScripts("./las-scratch-store.js");
 
-self.onmessage = (event) => {
-  const { type, buffer, options = {}, config = {} } = event.data || {};
+let acknowledgeTiles = null;
+self.onmessage = async (event) => {
+  const { type, buffer, file, options = {}, config = {} } = event.data || {};
+
+  if (type === "tiles-saved") {
+    acknowledgeTiles?.();
+    acknowledgeTiles = null;
+    return;
+  }
 
   if (type !== "parse-las") {
     return;
@@ -10,6 +18,20 @@ self.onmessage = (event) => {
   const octreeBuilder = new self.PointScapeOctreeBuilder(config);
 
   try {
+    if (file) {
+      const result = await octreeBuilder.parseFile(file, {
+        ...options,
+        onMetadata: (metadata) => self.postMessage({ type: "metadata", metadata }),
+        onProgress: (processed, total, details) => self.postMessage({ type: "progress", processed, total, details }),
+        onTiles: (tileRecords, details) => new Promise((resolve) => {
+          acknowledgeTiles = resolve;
+          self.postMessage({ type: "tiles", tileRecords, details, needsAck: true },
+            octreeBuilder.collectTileRecordTransferList(tileRecords));
+        }),
+      });
+      self.postMessage({ type: "done", result });
+      return;
+    }
     const progressiveCallbacks =
       config.progressiveLoadingPreview === true
         ? {

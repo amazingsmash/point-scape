@@ -5,90 +5,78 @@
       shouldExpandTile = () => false,
       useAccumulatedLod = false,
       previousExpandedTileIds = new Set(),
+      pointBudget = Infinity,
+      getTilePointCost = () => 0,
+      getTilePriority = () => 1,
     } = options;
     const recordsById = new Map(records.map((record) => [record.id, record]));
-    const rootTiles = records
-      .filter((record) => !record.parentId)
-      .sort((left, right) => (left.fileIndex || 0) - (right.fileIndex || 0));
-    const activeTiles = [];
+    const rootCandidates = records.filter((tile) => !tile.parentId && isTileVisible(tile))
+      .sort((left, right) => {
+        const priorityDifference = getTilePriority(right) - getTilePriority(left);
+        return priorityDifference || String(left.id).localeCompare(String(right.id));
+      });
+    const roots = [];
+    let used = 0;
+    for (const tile of rootCandidates) {
+      const cost = getTilePointCost(tile);
+      if (used + cost > pointBudget) continue;
+      roots.push(tile);
+      used += cost;
+    }
+    const active = new Map(roots.map((tile) => [tile.id, tile]));
     const nextExpandedTileIds = new Set();
-
-    rootTiles.forEach((tile) => {
-      collectActiveTiles({
-        tile,
-        recordsById,
-        isTileVisible,
-        shouldExpandTile,
-        useAccumulatedLod,
-        previousExpandedTileIds,
-        activeTiles,
-        nextExpandedTileIds,
-      });
-    });
-
-    return {
-      activeTiles,
-      nextExpandedTileIds,
-    };
-  }
-
-  function collectActiveTiles({
-    tile,
-    recordsById,
-    isTileVisible,
-    shouldExpandTile,
-    useAccumulatedLod,
-    previousExpandedTileIds,
-    activeTiles,
-    nextExpandedTileIds,
-  }) {
-    if (!isTileVisible(tile)) {
-      return;
-    }
-
-    if (useAccumulatedLod) {
-      activeTiles.push(tile);
-    }
-
-    const childTiles = (tile.childIds || [])
-      .map((childId) => recordsById.get(childId))
-      .filter(Boolean);
-
-    if (!childTiles.length) {
-      if (!useAccumulatedLod) {
-        activeTiles.push(tile);
+    // Global max-heap: priority must not depend on file/child traversal order.
+    const heap = [];
+    const precedes = (a, b) => a.priority > b.priority ||
+      (a.priority === b.priority && String(a.tile.id) < String(b.tile.id));
+    function enqueue(tile) {
+      if (!shouldExpandTile(tile, previousExpandedTileIds)) return;
+      const children = (tile.childIds || []).map((id) => recordsById.get(id))
+        .filter((child) => child && isTileVisible(child));
+      if (!children.length) return;
+      const priority = getTilePriority(tile);
+      const item = { tile, children, priority: Number.isNaN(priority) ? 0 : priority };
+      let index = heap.length;
+      heap.push(item);
+      while (index > 0) {
+        const parent = Math.floor((index - 1) / 2);
+        if (!precedes(item, heap[parent])) break;
+        heap[index] = heap[parent];
+        index = parent;
       }
-      return;
+      heap[index] = item;
     }
-
-    if (!shouldExpandTile(tile, previousExpandedTileIds)) {
-      if (!useAccumulatedLod) {
-        activeTiles.push(tile);
+    function pop() {
+      const first = heap[0];
+      const last = heap.pop();
+      if (heap.length) {
+        let index = 0;
+        while (index * 2 + 1 < heap.length) {
+          let child = index * 2 + 1;
+          if (child + 1 < heap.length && precedes(heap[child + 1], heap[child])) child += 1;
+          if (!precedes(heap[child], last)) break;
+          heap[index] = heap[child];
+          index = child;
+        }
+        heap[index] = last;
       }
-      return;
+      return first;
     }
-
-    nextExpandedTileIds.add(tile.id);
-    const activeTileCountBeforeChildren = activeTiles.length;
-    childTiles.forEach((childTile) => {
-      collectActiveTiles({
-        tile: childTile,
-        recordsById,
-        isTileVisible,
-        shouldExpandTile,
-        useAccumulatedLod,
-        previousExpandedTileIds,
-        activeTiles,
-        nextExpandedTileIds,
-      });
-    });
-
-    if (
-      !useAccumulatedLod &&
-      activeTiles.length === activeTileCountBeforeChildren
-    ) {
-      activeTiles.push(tile);
+    roots.forEach(enqueue);
+    while (heap.length) {
+      const { tile, children } = pop();
+      const extraCost = children.reduce((sum, child) => sum + getTilePointCost(child), 0)
+        - (useAccumulatedLod ? 0 : getTilePointCost(tile));
+      if (used + extraCost > pointBudget) continue;
+      used += extraCost;
+      nextExpandedTileIds.add(tile.id);
+      if (!useAccumulatedLod) active.delete(tile.id);
+      for (const child of children) {
+        active.set(child.id, child);
+        enqueue(child);
+      }
     }
+    return { activeTiles: [...active.values()], nextExpandedTileIds };
   }
 
   function isTileCompletelyBehindCamera(tile, camera) {
