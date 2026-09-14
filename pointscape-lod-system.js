@@ -7,6 +7,9 @@
       getCrsByFile = () => new Map(),
       lngLatToWebMercatorMeters,
       lngLatToUtm,
+      getScreenBounds = () => null,
+      isFullEnabled = () => true,
+      now = () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
     }) {
       this.config = config;
       this.tileSelection = tileSelection;
@@ -14,35 +17,54 @@
       this.getCrsByFile = getCrsByFile;
       this.lngLatToWebMercatorMeters = lngLatToWebMercatorMeters;
       this.lngLatToUtm = lngLatToUtm;
+      this.getScreenBounds = getScreenBounds;
+      this.isFullEnabled = isFullEnabled;
+      this.now = now;
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
+      this.visibilityByTileId = new Map();
     }
 
     reset() {
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
+      this.visibilityByTileId = new Map();
     }
 
     selectActiveTiles(records, map) {
       const mapCenter = map?.getCenter?.();
+      this.selectionNow = this.now();
+      this.screenBounds = new Map();
+      this.visibilityEvaluations = new Map();
       const useAccumulatedLod = this.getSummary()?.indexingMode === "m3no";
-      const { activeTiles, nextExpandedTileIds } =
+      const { activeTiles, nextExpandedTileIds, nextFullTileIds, nextFullPointCounts } =
         this.tileSelection.selectActiveTiles(records, {
           useAccumulatedLod,
           pointBudget: this.config.residentPointBudget || 500000,
-          // Storage fetches contain both payloads; reserve both before fetching.
-          getTilePointCost: (tile) => (tile.sampledPointCount || 0) +
-            (tile.childIds?.length ? 0 : tile.fullPointCount || 0),
+          getTilePointCost: (tile) => tile.sampledPointCount || 0,
+          getFullPointCost: (tile) => tile.fullPointCount || 0,
+          shouldUseFull: (tile) => this.isFullEnabled() && tile.fullPointCount > 0 &&
+            this.shouldExpandTile(tile, map, mapCenter, this.fullResolutionTileIds.has(tile.id)),
+          previousActiveTileIds: this.activeTileIds,
+          previousFullTileIds: this.fullResolutionTileIds,
           previousExpandedTileIds: this.expandedTileIds,
+          swapHysteresis: this.config.lodSwapHysteresisRatio ?? 0.2,
           isTileVisible: (tile) => this.isTileLoadableInMap(tile, map, mapCenter),
           shouldExpandTile: (tile) => this.shouldExpandTile(tile, map, mapCenter),
-          getTilePriority: (tile) => this.getTileAngularDiagonalDegrees(tile, map, mapCenter),
+          getTilePriority: (tile) => this.getVisualPriority(tile, map, mapCenter),
         });
 
       this.expandedTileIds = nextExpandedTileIds;
+      this.fullResolutionTileIds = nextFullTileIds;
+      this.fullPointCounts = nextFullPointCounts;
       this.activeTileIds = new Set(activeTiles.map((tile) => tile.id));
+
+      const recordIds = new Set(records.map(tile => tile.id));
+      for (const tileId of this.visibilityByTileId.keys()) {
+        if (!recordIds.has(tileId)) this.visibilityByTileId.delete(tileId);
+      }
 
       return activeTiles;
     }
@@ -55,16 +77,14 @@
     }
 
     shouldExpandTile(tile, map, mapCenter, wasExpanded = this.expandedTileIds.has(tile.id)) {
-      const angularDiagonalDegrees = this.getTileAngularDiagonalDegrees(
-        tile,
-        map,
-        mapCenter,
-      );
-      const angularThresholdDegrees =
-        this.config.fullResolutionAngularDiagonalDegrees *
+      const metric = this.getTileScreenSpaceMetric(tile, map, mapCenter);
+      const threshold = metric.units === "pixels"
+        ? this.getAngularThresholdPixels(map)
+        : this.config.fullResolutionAngularDiagonalDegrees;
+      const stableThreshold = threshold *
         (wasExpanded ? 1 - this.config.tileCollapseHysteresisRatio : 1);
 
-      return angularDiagonalDegrees >= angularThresholdDegrees;
+      return metric.value >= stableThreshold;
     }
 
     getTileAngularDiagonalDegrees(tile, map, mapCenter) {
@@ -90,7 +110,77 @@
     }
 
     isTileLoadableInMap(tile, map, mapCenter) {
-      return !this.isTileCompletelyBehindMapCamera(tile, map, mapCenter);
+      return this.getStableVisibility(tile, map, mapCenter).visible;
+    }
+
+    getCachedScreenBounds(tile, margin = 1.08) {
+      this.screenBounds ||= new Map();
+      const key = `${tile.id}:${margin}`;
+      if (!this.screenBounds.has(key)) this.screenBounds.set(key, this.getScreenBounds(tile, margin));
+      return this.screenBounds.get(key);
+    }
+
+    getStableVisibility(tile, map, mapCenter) {
+      this.visibilityEvaluations ||= new Map();
+      if (this.visibilityEvaluations.has(tile.id)) return this.visibilityEvaluations.get(tile.id);
+
+      const now = this.selectionNow ?? this.now();
+      const previous = this.visibilityByTileId.get(tile.id) || {
+        visible: false,
+        visibleSince: -Infinity,
+        lastRawVisibleAt: -Infinity,
+        metric: 0,
+      };
+      const enterMargin = this.config.visibilityEnterMargin ?? 1.05;
+      const exitMargin = Math.max(enterMargin, this.config.visibilityExitMargin ?? 1.18);
+      const screen = this.getCachedScreenBounds(tile, previous.visible ? exitMargin : enterMargin);
+      const rawVisible = screen
+        ? screen.visible
+        : !this.isTileCompletelyBehindMapCamera(tile, map, mapCenter);
+      const minimumResidenceMs = this.config.visibilityMinimumResidenceMs ?? 220;
+      const lastRawVisibleAt = rawVisible ? now : previous.lastRawVisibleAt;
+      const withinMinimumResidence = previous.visible &&
+        now - lastRawVisibleAt < minimumResidenceMs;
+      const visible = rawVisible || withinMinimumResidence;
+      const metric = rawVisible
+        ? Math.max(0, screen?.diagonalPixels || 0)
+        : visible
+          ? previous.metric
+          : 0;
+      const next = {
+        visible,
+        rawVisible,
+        metric,
+        screen,
+        visibleSince: visible && !previous.visible ? now : previous.visibleSince,
+        lastRawVisibleAt,
+      };
+      this.visibilityByTileId.set(tile.id, next);
+      this.visibilityEvaluations.set(tile.id, next);
+      return next;
+    }
+
+    getAngularThresholdPixels(map) {
+      const viewportHeight = this.getMapViewportHeightPixels(map);
+      const fov = this.getMapVerticalFovRadians(map);
+      const angle = this.config.fullResolutionAngularDiagonalDegrees * Math.PI / 180;
+      const focalLengthPixels = viewportHeight / (2 * Math.tan(fov / 2));
+      return 2 * focalLengthPixels * Math.tan(angle / 2);
+    }
+
+    getTileScreenSpaceMetric(tile, map, mapCenter = map?.getCenter?.()) {
+      const visibility = this.getStableVisibility(tile, map, mapCenter);
+      if (visibility.screen) {
+        return { value: visibility.visible ? visibility.metric : 0, units: "pixels" };
+      }
+      return {
+        value: visibility.visible ? this.getTileAngularDiagonalDegrees(tile, map, mapCenter) : 0,
+        units: "degrees",
+      };
+    }
+
+    getVisualPriority(tile, map, mapCenter = map?.getCenter?.()) {
+      return this.getTileScreenSpaceMetric(tile, map, mapCenter).value;
     }
 
     getTileCrs(tile) {

@@ -116,7 +116,7 @@
   class VolatileTileStore {
     constructor({
       name = "pointscape-volatile-tiles",
-      version = 1,
+      version = 2,
       storeName = "tiles",
       getBatchSize = () => 24,
       yieldToBrowser = () => Promise.resolve(),
@@ -163,6 +163,9 @@
               keyPath: "id",
             });
           }
+          if (!db.objectStoreNames.contains("full-payloads")) {
+            db.createObjectStore("full-payloads", { keyPath: "id" });
+          }
         };
         openRequest.onsuccess = () => {
           const db = openRequest.result;
@@ -192,7 +195,13 @@
         return;
       }
 
-      await this.runTransaction("readwrite", (store) => store.clear());
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction([this.storeName, "full-payloads"], "readwrite");
+        tx.objectStore(this.storeName).clear();
+        tx.objectStore("full-payloads").clear();
+        tx.oncomplete = resolve;
+        tx.onerror = tx.onabort = () => reject(tx.error);
+      });
     }
 
     async saveRecords(tileRecords) {
@@ -207,10 +216,16 @@
       for (let startIndex = 0; startIndex < tileRecords.length; startIndex += batchSize) {
         const batch = tileRecords.slice(startIndex, startIndex + batchSize);
 
-        await this.runTransaction("readwrite", (store) => {
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction([this.storeName, "full-payloads"], "readwrite");
+          const store = tx.objectStore(this.storeName);
           batch.forEach((record) => {
-            store.put(serializeTileRecordForStorage(record));
+            const stored = serializeTileRecordForStorage(record);
+            if (stored.fullPoints) tx.objectStore("full-payloads").put({ id: record.id, points: stored.fullPoints });
+            store.put({ ...stored, fullPoints: null });
           });
+          tx.oncomplete = resolve;
+          tx.onerror = tx.onabort = () => reject(tx.error);
         });
         batch.forEach(stripTileRecordPointPayload);
         await this.yieldToBrowser();
@@ -218,6 +233,13 @@
     }
 
     async getRecord(tileKey) {
+      const record = await this.getRepresentation(tileKey, "sample");
+      if (!record) return null;
+      const full = record.fullPointCount ? await this.getRepresentation(tileKey, "full") : null;
+      return { ...record, fullPoints: full?.points || null };
+    }
+
+    async getRepresentation(tileKey, source = "sample") {
       const db = await this.getDb();
 
       if (!db) {
@@ -225,8 +247,9 @@
       }
 
       return new Promise((resolve, reject) => {
-        const transaction = db.transaction(this.storeName, "readonly");
-        const store = transaction.objectStore(this.storeName);
+        const name = source === "full" ? "full-payloads" : this.storeName;
+        const transaction = db.transaction(name, "readonly");
+        const store = transaction.objectStore(name);
         const request = store.get(tileKey);
 
         request.onsuccess = () =>

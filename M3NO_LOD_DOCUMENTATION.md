@@ -1,8 +1,16 @@
 # M3NO Point Structure and Level-of-Detail Scheme
 
+> Historical design description. The runtime now uses budgeted, preemptive
+> streaming with individual M3NO children, intermediate leaf density levels,
+> six-plane culling, and separate sample/full storage. The timing, storage and
+> no-budget descriptions below describe the earlier implementation. See
+> [ARCHITECTURE.md](ARCHITECTURE.md) for the current allocation and transition
+> policy and [tests/lod-streaming.test.js](tests/lod-streaming.test.js) for its
+> behavioral regression cases.
+
 ## 1. Purpose and terminology
 
-This document describes PointScape's current **M3NO** point structure, its
+This document describes PointScape's original **M3NO** point structure, its
 level-of-detail (LOD) scheme, and the node loading and unloading lifecycle. The
 name “M3neo” is sometimes used to refer to this structure; the project source
 code and user interface use the name `M3NO`.

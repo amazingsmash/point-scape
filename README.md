@@ -167,13 +167,18 @@ worker continues. Leaves contain at most 50,000-200,000 full-resolution points
 according to that tier, including dense or coincident data. All valid source
 points remain in leaf storage.
 
-LOD expansion reserves a 500,000-point payload budget (sample plus leaf payloads)
-before fetching nodes. When refinement would exceed it, the parent representation
-remains visible. This trades immediate detail for a lower memory footprint.
-It is a payload budget, not a measurement or guarantee of total Safari RAM use.
-The **Max points on screen** slider changes this budget immediately. Camera motion
-reevaluates LOD on each rendered frame, without debounce or retry timers; IndexedDB
-and GPU work still complete asynchronously at the speed allowed by the device.
+LOD uses a default 1,500,000-point drawing budget, changed immediately by **Max
+points on screen**. A common projected screen-size metric determines refinement
+and where detail is most valuable. Entry/exit visibility margins, minimum
+residence, and a short last-frame hold prevent camera-edge and loading flicker.
+M3NO loads children independently; leaves have intermediate density levels.
+Less relevant detail collapses to ancestor samples to make room for nearby detail.
+QuadTree keeps parent coverage until its replacement children are ready.
+Reads are prioritized individually and reevaluated against the latest camera.
+Samples and full-resolution leaves are fetched separately from IndexedDB.
+A separate allocation allowance bounds cached payloads and upload staging; it
+does not measure or guarantee total browser RAM. Disk speed and GPU upload time
+still limit convergence, and extremely small budgets can omit entire roots.
 
 Indexing needs temporary device storage. Each partition is decoded once; M3NO only
 revisits the small set of temporary blocks containing its final cell samples. A

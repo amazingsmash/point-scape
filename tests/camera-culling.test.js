@@ -24,6 +24,8 @@ for (const useAccumulatedLod of [false, true]) {
     assert.deepEqual(run([...records].reverse().map((tile) => ({ ...tile, childIds: [...tile.childIds].reverse() }))), result);
     records[1].angle = 90; // Moving the camera changes which branch wins.
     records[2].angle = 20;
+    records[3].angle = 45;
+    records[4].angle = 10;
     assert.ok(run(records).includes("far-detail"));
     assert.ok(!run(records).includes("near-detail"));
   });

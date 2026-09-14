@@ -34,18 +34,23 @@ const pointCloudConfig = {
   tileMaxDepth: 8,
   fullResolutionAngularDiagonalDegrees: 15,
   tileCollapseHysteresisRatio: 0.1,
+  lodSwapHysteresisRatio: 0.2,
+  visibilityEnterMargin: 1.05,
+  visibilityExitMargin: 1.18,
+  visibilityMinimumResidenceMs: 220,
+  lodTransitionHoldMs: 220,
   parseYieldEveryPoints: 5000,
   progressiveLoadingPreview: false,
   progressiveTilePointInterval: 100000,
   progressiveTileMinimumMs: 300,
   indexedDbWriteBatchSize: 24,
-  residentPointBudget: 500000,
+  residentPointBudget: 1500000,
   flyToClearanceMeters: 1000,
 };
 
 const volatileTileDbConfig = {
   name: "pointscape-volatile-tiles",
-  version: 1,
+  version: 2,
   storeName: "tiles",
 };
 const pointCloudVertexStrideBytes = 16;
@@ -126,6 +131,8 @@ let currentTileIndex = [];
 let currentTileCrsByFile = new Map();
 let pointCloudTileRefreshId = 0;
 let currentPointCloudStats = null;
+let pointCloudLodRefreshQueued = false;
+let pointCloudFinalFrameRefreshPending = false;
 
 const pointscapeTileStore = new PointScapeDataIngestion.VolatileTileStore({
   ...volatileTileDbConfig,
@@ -145,6 +152,7 @@ const pointscapeLasIngestion = new PointScapeDataIngestion.LasDataIngestionServi
     indexedDbWriteBatchSize: pointCloudConfig.indexedDbWriteBatchSize,
   }),
 });
+const lodMercatorBounds = new WeakMap();
 const pointscapeLodSystem = new PointScapeLodSystem({
   config: pointCloudConfig,
   tileSelection: PointScapeTileSelection,
@@ -152,6 +160,20 @@ const pointscapeLodSystem = new PointScapeLodSystem({
   getCrsByFile: () => currentTileCrsByFile,
   lngLatToWebMercatorMeters,
   lngLatToUtm,
+  isFullEnabled: () => isFullResolutionEnabled(),
+  getScreenBounds: (tile, margin) => {
+    const layer = window.pointCloudLayer;
+    const canvas = window.mapLibreMap?.getCanvas?.();
+    if (!layer?.pickMatrix || !canvas) return null;
+    const geometryKey = `${terrainToggle.checked}:${getTerrainExaggeration()}:${getPointCloudOffsetMeters()}`;
+    let cached = lodMercatorBounds.get(tile);
+    if (cached?.key !== geometryKey) {
+      cached = { key: geometryKey, corners: createDetailBoxMercatorCorners(tile) };
+      lodMercatorBounds.set(tile, cached);
+    }
+    return PointScapeLodStreaming.projectScreenBounds(cached.corners,
+      layer.pickMatrix, canvas.clientWidth, canvas.clientHeight, { margin });
+  },
 });
 const pointscapeUiController = new PointScapeUiController({
   elements: {
@@ -347,13 +369,10 @@ function initMap() {
     window.mapLibreMap.resize();
   });
 
-  window.mapLibreMap.on("render", () => {
-    if (window.mapLibreMap.isMoving()) schedulePointCloudTileRefresh();
-  });
-
   window.mapLibreMap.on("moveend", () => {
     refreshTileBounds();
-    schedulePointCloudTileRefresh();
+    pointCloudFinalFrameRefreshPending = true;
+    window.mapLibreMap.triggerRepaint();
   });
 
   window.nodeInspector = new PointScapeNodeInspector.Controller({
@@ -652,6 +671,7 @@ function createWebGlPointCloudLayer() {
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
       this.pickMatrix = Array.from(matrix);
+      schedulePointCloudTileRefreshAfterRenderedFrame();
       gl.uniform1f(this.pointSizeLocation, getPointSizePixels());
       gl.uniform1f(this.depthBiasLocation, getDepthBias());
       setPointCloudClassColorUniforms(gl, this);
@@ -2066,170 +2086,81 @@ function schedulePointCloudTileRefresh() {
   applyPointCloudTileSelection();
 }
 
-let queuedTileSelection = null;
-let tileSelectionRunPromise = null;
-function applyPointCloudTileSelection(options = {}) {
-  queuedTileSelection = options;
-  if (!tileSelectionRunPromise) {
-    tileSelectionRunPromise = drainPointCloudTileSelections();
-  }
+function schedulePointCloudTileRefreshAfterRenderedFrame() {
+  const map = window.mapLibreMap;
+  if (!map || !currentPointCloudTiles.length) return;
+  if (!map.isMoving() && !pointCloudFinalFrameRefreshPending) return;
 
-  return tileSelectionRunPromise;
-}
-
-async function drainPointCloudTileSelections() {
-  try {
-    while (queuedTileSelection) {
-      const next = queuedTileSelection;
-      queuedTileSelection = null;
-      await applyPointCloudTileSelectionNow(next);
-    }
-  } finally {
-    tileSelectionRunPromise = null;
-  }
-}
-
-async function applyPointCloudTileSelectionNow(options = {}) {
-  if (!window.pointCloudLayer || !window.mapLibreMap) {
-    return;
-  }
-
-  const refreshId = ++pointCloudTileRefreshId;
-  const activeTileMetadata = selectActiveTiles(
-    currentTileIndex,
-    window.mapLibreMap,
-  );
-  const activeTileIds = activeTileMetadata.map((tile) => tile.id);
-  const activeTileDescriptors = activeTileMetadata.map(
-    getRenderableTileDescriptor,
-  );
-
-  if (refreshId !== pointCloudTileRefreshId) {
-    return;
-  }
-
-  if (!activeTileIds.length) {
-    currentPointCloudPoints = [];
-    currentPendingDetailTileIds = new Set();
-    window.pointCloudLayer.setTiles([], window.mapLibreMap, {
-      forceRebuild: true,
-    });
-    updateDetailBoxesLayer();
-    updateBlockBoundsLayer([]);
-
-    if (options.updateStatus !== false) {
-      updatePointCloudStatus(0, 0, 0);
-    }
-    updateLivePointCloudStats(0, 0, 0);
-    return;
-  }
-
-  const tileIdsToFetch = activeTileDescriptors
-    .filter(
-      (tile) =>
-        !window.pointCloudLayer.hasTileBuffer?.(tile.id, tile.renderKey),
-    )
-    .map((tile) => tile.id);
-  currentPendingDetailTileIds = getPendingDetailParentTileIds(tileIdsToFetch);
-  updateDetailBoxesLayer();
-  const activeTiles = await getStoredTileRecords(tileIdsToFetch);
-
-  if (refreshId !== pointCloudTileRefreshId) {
-    return;
-  }
-
-  const activeTilesById = new Map(activeTiles.map((tile) => [tile.id, tile]));
-  const missingTileIds = tileIdsToFetch.filter(
-    (tileId) => !activeTilesById.has(tileId),
-  );
-  const points = [];
-  const renderableTiles = [];
-  let renderedPointCount = 0;
-  let availablePointCount = 0;
-
-  activeTileMetadata.forEach((metadata) => {
-    const fetchedRecord = activeTilesById.get(metadata.id);
-    const descriptor = fetchedRecord
-      ? getRenderableTileDescriptor(fetchedRecord)
-      : getRenderableTileDescriptor(metadata);
-    const tilePoints = descriptor.points;
-    const pointCount =
-      getPointSetCount(tilePoints) ||
-      (window.pointCloudLayer.hasTileBuffer?.(
-        descriptor.id,
-        descriptor.renderKey,
-      )
-        ? descriptor.pointCount
-        : 0);
-
-    availablePointCount +=
-      metadata.sourcePointCount ||
-      metadata.originalPointCount ||
-      metadata.fullPointCount ||
-      pointCount;
-    renderedPointCount += pointCount;
-
-    if (pointCount > 0) {
-      if (getPointSetCount(tilePoints) > 0) {
-        points.push(tilePoints);
-      }
-      renderableTiles.push({
-        id: descriptor.id,
-        points: tilePoints,
-        pointCount,
-        renderKey: descriptor.renderKey,
-      });
-    }
+  pointCloudFinalFrameRefreshPending = false;
+  if (pointCloudLodRefreshQueued) return;
+  pointCloudLodRefreshQueued = true;
+  queueMicrotask(() => {
+    pointCloudLodRefreshQueued = false;
+    schedulePointCloudTileRefresh();
   });
+}
 
-  if (
-    missingTileIds.length &&
-    options.retryMissingTiles !== false
-  ) {
-    currentPendingDetailTileIds = getPendingDetailParentTileIds(missingTileIds);
+const pointscapeLodStreamer = new PointScapeLodStreaming.LodStreamer({
+  read: (id, source) => pointscapeTileStore.getRepresentation(id, source),
+  select: PointScapeTileSelection.selectActiveTiles,
+  yieldFrame: () => new Promise(resolve => requestAnimationFrame(resolve)),
+  transitionHoldMs: pointCloudConfig.lodTransitionHoldMs,
+  publish: (tiles) => {
+    const map = window.mapLibreMap;
+    const layer = window.pointCloudLayer;
+    if (!layer || !map) return;
+    layer.setTiles(tiles, map);
+    currentPointCloudPoints = layer.points;
+    const ids = new Set(tiles.map(tile => tile.id));
+    const metadata = currentTileIndex.filter(tile => ids.has(tile.id));
+    updateBlockBoundsLayer(metadata);
+    const count = tiles.reduce((sum, tile) => sum + tile.pointCount, 0);
+    const available = metadata.reduce((sum, tile) => sum + (tile.sourcePointCount || tile.fullPointCount || tile.sampledPointCount || 0), 0);
+    updateLivePointCloudStats(count, available, tiles.length);
+    updatePointCloudStatus(count, available, tiles.length);
+    currentPendingDetailTileIds = getPendingDetailParentTileIds(
+      (pointscapeLodStreamer.plan?.activeTiles || []).filter(tile => !ids.has(tile.id)).map(tile => tile.id));
     updateDetailBoxesLayer();
+  },
+});
 
-    if (!renderedPointCount && options.updateStatus !== false) {
-      lasStatus.textContent = `Loading ${missingTileIds.length.toLocaleString(
-        "en-US",
-      )} active tile payloads...`;
-    }
-
-    applyPointCloudTileSelection({
-      ...options,
-      retryMissingTiles: false,
-    });
-
-    if (!renderedPointCount) {
-      return;
+function applyPointCloudTileSelection(options = {}) {
+  if (!window.pointCloudLayer || !window.mapLibreMap || (lasLoadInProgress && !options.updateStatus)) return Promise.resolve();
+  ++pointCloudTileRefreshId;
+  const map = window.mapLibreMap;
+  const activeTiles = selectActiveTiles(currentTileIndex, map);
+  const priorities = new Map();
+  const byId = new Map(currentTileIndex.map(tile => [tile.id, tile]));
+  for (const selected of activeTiles) {
+    let tile = selected;
+    while (tile && !priorities.has(tile.id)) {
+      priorities.set(tile.id, pointscapeLodSystem.getVisualPriority(tile, map));
+      tile = byId.get(tile.parentId);
     }
   }
-
-  window.pointCloudLayer.setTiles(renderableTiles, window.mapLibreMap);
-  currentPendingDetailTileIds = getPendingDetailParentTileIds(missingTileIds);
+  const budget = pointCloudConfig.residentPointBudget;
+  pointscapeLodStreamer.memoryBudgetBytes = Math.max(128 * 1024 * 1024, budget * 96);
+  const completion = pointscapeLodStreamer.update({
+    records: currentTileIndex,
+    activeTiles,
+    fullIds: new Set(pointscapeLodSystem.fullResolutionTileIds),
+    fullCounts: new Map(pointscapeLodSystem.fullPointCounts),
+    expandedIds: new Set(pointscapeLodSystem.expandedTileIds),
+    accumulated: currentPointCloudSummary?.indexingMode === "m3no",
+    budget,
+    priority: tile => priorities.get(tile.id) || 0,
+  });
+  currentPendingDetailTileIds = getPendingDetailParentTileIds(activeTiles
+    .filter(tile => !window.pointCloudLayer.tileBuffersById?.has(tile.id)).map(tile => tile.id));
   updateDetailBoxesLayer();
-  currentPointCloudPoints = window.pointCloudLayer.points || points;
-  updateBlockBoundsLayer(activeTileMetadata);
-  updateLivePointCloudStats(
-    renderedPointCount,
-    availablePointCount,
-    activeTileMetadata.length,
-  );
-
-  if (options.updateStatus !== false) {
-    updatePointCloudStatus(
-      renderedPointCount,
-      availablePointCount,
-      activeTileMetadata.length,
-    );
-  }
+  return completion;
 }
 
 function getRenderableTileDescriptor(record) {
   const useFullResolution =
     isFullResolutionEnabled() &&
     isFullResolutionTile(record) &&
-    pointscapeLodSystem.shouldUseFullResolution(record, window.mapLibreMap) &&
+    pointscapeLodSystem.fullResolutionTileIds.has(record.id) &&
     (getPointSetCount(record.fullPoints) || record.fullPointCount);
   const source = useFullResolution ? "full" : "sample";
   const points = useFullResolution ? record.fullPoints : record.points;
@@ -3098,6 +3029,7 @@ async function loadLasFiles(files) {
   lasLoadInProgress = true;
   window.nodeInspector?.reset();
   pointCloudTileRefreshId += 1;
+  pointscapeLodStreamer.reset();
   lasFileInput.disabled = true;
   try {
     await clearVolatileTileDb();

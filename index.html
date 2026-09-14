@@ -128,6 +128,7 @@
                     type="radio"
                     name="las-indexing-mode"
                     value="quadtree"
+                    checked
                   />
                   <span>QuadTree</span>
                 </label>
@@ -136,7 +137,6 @@
                     type="radio"
                     name="las-indexing-mode"
                     value="m3no"
-                    checked
                   />
                   <span>M3NO</span>
                 </label>
@@ -185,14 +185,14 @@
                 </label>
                 <label class="camera-control" for="lod-point-budget-control">
                   <span>Max points on screen</span>
-                  <output id="lod-point-budget-value" for="lod-point-budget-control">500,000</output>
+                  <output id="lod-point-budget-value" for="lod-point-budget-control">1,500,000</output>
                   <input
                     type="range"
                     id="lod-point-budget-control"
                     min="25000"
-                    max="5000000"
+                    max="10000000"
                     step="25000"
-                    value="500000"
+                    value="1500000"
                   />
                 </label>
                 <label class="numeric-control" for="tile-min-diagonal-control">
@@ -252,14 +252,14 @@
             <div class="control-section-body">
               <label class="camera-control" for="depth-bias-control">
                 <span>Depth advantage</span>
-                <output id="depth-bias-value" for="depth-bias-control">0.0020</output>
+                <output id="depth-bias-value" for="depth-bias-control">0.0100</output>
                 <input
                   type="range"
                   id="depth-bias-control"
                   min="0"
-                  max="0.01"
+                  max="0.05"
                   step="0.0001"
-                  value="0.002"
+                  value="0.01"
                 />
               </label>
             </div>
@@ -322,6 +322,7 @@
     </section>
     <script src="./js-console.js?v=1"></script>
     <script src="./tile-selection.js?v=3"></script>
+    <script src="./pointscape-lod-streaming.js?v=1"></script>
     <script src="./pointscape-data-ingestion.js?v=2"></script>
     <script src="./pointscape-lod-system.js?v=3"></script>
     <script src="./pointscape-ui-controller.js?v=2"></script>

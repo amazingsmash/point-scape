@@ -46,6 +46,8 @@ classes together during startup.
   hysteresis, and behind-camera culling.
 - `tile-selection.js`: pure traversal helpers used by the LOD system and unit
   tests.
+- `pointscape-lod-streaming.js`: prioritized single-read streaming, sample
+  fallback residency, atomic QuadTree swaps, and conservative screen projection.
 - `tests/`: Node test suite for pure logic.
 
 ## Data Flow
@@ -72,21 +74,32 @@ thread after its IndexedDB transaction commits. No unsaved tile queue grows whil
 storage is slow. The final result contains metadata only. The legacy ArrayBuffer
 parser remains available for compatibility but is not the UI file-loading path.
 
-LOD traversal reserves sample and leaf payload costs before expanding a node;
-the default resident payload budget is 500,000 points. Tile selection/fetch work
-is serialized so rapid camera events cannot pile up simultaneous payload reads.
-The budget is editable in the UI and also applies across multiple root nodes.
-During camera motion, every MapLibre render frame requests a fresh selection;
-queued selections and missing-node retries have no timer delay.
-These are allocation bounds, not browser-wide memory measurements.
+LOD allocates a 1,500,000-point default display budget across all visible roots.
+Refinement eligibility and budget priority use the same projected box-diagonal
+metric. Its pixel threshold is derived from the angular control and MapLibre's
+vertical field of view. Conservative six-plane culling uses separate 5% entry
+and 18% exit guard bands, plus 220 ms minimum visible residence. Resident
+operations receive 20% priority hysteresis.
+M3NO admits children individually while keeping ancestor coverage. QuadTree
+replaces complete sibling groups. Leaves compete for quantized intermediate
+levels up to full resolution, using a deterministic nested point permutation.
 
-LOD refinement uses a global maximum-priority queue ordered by angular node
-size, with stable ID ties. It reserves each visible root, then spends the remaining
-payload budget on the largest eligible node regardless of input or child order.
-QuadTree replaces parents; M3NO retains their disjoint samples. Leaves independently
-check the angular threshold before switching from samples to full payloads, with
-separate hysteresis state. The storage budget still includes both leaf payloads
-because IndexedDB retrieves a whole record.
+The streamer tracks the latest desired plan separately from resident payloads.
+It keeps ancestor samples and the last complete displayed frame for up to 220 ms
+while successor payloads arrive, without exceeding the point budget. It reads
+one eligible representation at a time in visual-priority order and yields to
+animation frames between uploads. QuadTree parents remain until all required
+child samples are ready. A completed read is adopted only if the latest plan
+still needs it; dataset epochs reject all previous-dataset reads. Camera-driven
+selection is queued from the custom-layer render after the current MapLibre
+matrix is captured; `moveend` requests one final rendered-frame selection.
+
+IndexedDB version 2 stores samples in `tiles` and leaf payloads separately in
+`full-payloads`; inspector `getRecord` recombines them on demand. The streamer
+reserves packed-cache bytes plus display/staging allowance before each read.
+Its accounting limit is max(128 MiB, display budget * 96 bytes), independently
+from the exact draw-point cap. This is allocation accounting, not total browser
+RAM measurement. An indivisible read that cannot fit retains sample coverage.
 
 For Mercator views the camera eye is derived from MapLibre's current transform
 center distance, world size, pixels per meter, pitch, bearing and terrain elevation.

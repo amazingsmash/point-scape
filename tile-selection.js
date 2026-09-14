@@ -8,11 +8,18 @@
       pointBudget = Infinity,
       getTilePointCost = () => 0,
       getTilePriority = () => 1,
+      getFullPointCost = () => 0,
+      shouldUseFull = () => false,
+      previousActiveTileIds = new Set(),
+      previousFullTileIds = new Set(),
+      swapHysteresis = 0.15,
     } = options;
     const recordsById = new Map(records.map((record) => [record.id, record]));
     const rootCandidates = records.filter((tile) => !tile.parentId && isTileVisible(tile))
       .sort((left, right) => {
-        const priorityDifference = getTilePriority(right) - getTilePriority(left);
+        const stablePriority = tile => getTilePriority(tile) *
+          (previousActiveTileIds.has(tile.id) ? 1 + swapHysteresis : 1);
+        const priorityDifference = stablePriority(right) - stablePriority(left);
         return priorityDifference || String(left.id).localeCompare(String(right.id));
       });
     const roots = [];
@@ -25,17 +32,34 @@
     }
     const active = new Map(roots.map((tile) => [tile.id, tile]));
     const nextExpandedTileIds = new Set();
+    const nextFullTileIds = new Set();
+    const nextFullPointCounts = new Map();
     // Global max-heap: priority must not depend on file/child traversal order.
     const heap = [];
     const precedes = (a, b) => a.priority > b.priority ||
-      (a.priority === b.priority && String(a.tile.id) < String(b.tile.id));
+      (a.priority === b.priority && String(a.orderId) < String(b.orderId));
     function enqueue(tile) {
+      if (!tile.childIds?.length && shouldUseFull(tile)) {
+        push({ tile, children: [], full: true, priority: getTilePriority(tile) *
+          (previousFullTileIds.has(tile.id) ? 1 + swapHysteresis : 1) });
+      }
       if (!shouldExpandTile(tile, previousExpandedTileIds)) return;
       const children = (tile.childIds || []).map((id) => recordsById.get(id))
         .filter((child) => child && isTileVisible(child));
       if (!children.length) return;
-      const priority = getTilePriority(tile);
-      const item = { tile, children, priority: Number.isNaN(priority) ? 0 : priority };
+      if (useAccumulatedLod) {
+        for (const child of children) {
+          push({ tile, children: [child], priority: getTilePriority(child) *
+            (previousActiveTileIds.has(child.id) ? 1 + swapHysteresis : 1) });
+        }
+      } else {
+        push({ tile, children, priority: getTilePriority(tile) *
+          (previousExpandedTileIds.has(tile.id) ? 1 + swapHysteresis : 1) });
+      }
+    }
+    function push(item) {
+      item.orderId = item.full ? `${item.tile.id}:full` : `${item.tile.id}:${item.children.map(child => child.id).sort().join(",")}`;
+      if (Number.isNaN(item.priority)) item.priority = 0;
       let index = heap.length;
       heap.push(item);
       while (index > 0) {
@@ -64,7 +88,22 @@
     }
     roots.forEach(enqueue);
     while (heap.length) {
-      const { tile, children } = pop();
+      const { tile, children, full } = pop();
+      if (full) {
+        const current = nextFullPointCounts.get(tile.id) ?? getTilePointCost(tile);
+        const maximum = getFullPointCost(tile);
+        const count = Math.min(maximum, Math.max(current + 1024, current * 2));
+        const extra = Math.max(0, count - current);
+        if (used + extra <= pointBudget) {
+          used += extra;
+          nextFullTileIds.add(tile.id);
+          nextFullPointCounts.set(tile.id, count);
+          if (count < maximum) push({ tile, children: [], full: true,
+            priority: getTilePriority(tile) * Math.sqrt(Math.max(1, getTilePointCost(tile)) / Math.max(1, count)) *
+              (previousFullTileIds.has(tile.id) ? 1 + swapHysteresis : 1) });
+        }
+        continue;
+      }
       const extraCost = children.reduce((sum, child) => sum + getTilePointCost(child), 0)
         - (useAccumulatedLod ? 0 : getTilePointCost(tile));
       if (used + extraCost > pointBudget) continue;
@@ -76,7 +115,7 @@
         enqueue(child);
       }
     }
-    return { activeTiles: [...active.values()], nextExpandedTileIds };
+    return { activeTiles: [...active.values()], nextExpandedTileIds, nextFullTileIds, nextFullPointCounts };
   }
 
   function isTileCompletelyBehindCamera(tile, camera) {
