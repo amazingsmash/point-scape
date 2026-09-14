@@ -20,7 +20,8 @@ Repository: <https://github.com/amazingsmash/point-scape>
 - Local loading of one or more `.las` files.
 - WebGL visualization of points over the map.
 - Coloring by LAS classification.
-- Controls for point size, vertical offset, and depth advantage.
+- Perspective point sizing with controls for physical radius, minimum screen
+  radius, maximum screen radius, vertical offset, and depth advantage.
 - Selectable indexing mode: QuadTree or M3NO.
 - Adaptive level-of-detail loading.
 - Optional display of loaded node bounds and tile labels.
@@ -123,6 +124,12 @@ The main flow is:
 6. `VolatileTileStore` keeps tile payloads in a temporary IndexedDB database.
 7. `PointScapeLodSystem` selects active nodes from camera state, distance, and LOD thresholds.
 8. A custom WebGL layer renders the point cloud above the map.
+
+Point sprites use a physical radius in centimetres. The vertex shader converts
+that radius to local Mercator units and projects it using each vertex's clip-space
+depth, so nearby points grow and distant points shrink. Minimum and maximum
+screen-radius clamps keep distant samples legible and prevent close points from
+covering the view. The defaults are 8 cm, 0.75 px minimum, and 24 px maximum.
 
 The application uses a volatile IndexedDB database (`pointscape-volatile-tiles`) to manage tiles during the current session. This information is temporary and is rebuilt when data is loaded again.
 

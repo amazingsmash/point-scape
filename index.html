@@ -232,16 +232,40 @@
                   value="2"
                 />
               </label>
-              <label class="camera-control" for="point-size-control">
-                <span>Point size</span>
-                <output id="point-size-value" for="point-size-control">3 px</output>
+              <label class="camera-control" for="point-radius-control">
+                <span>Physical point radius</span>
+                <output id="point-radius-value" for="point-radius-control">8 cm</output>
                 <input
                   type="range"
-                  id="point-size-control"
+                  id="point-radius-control"
                   min="1"
-                  max="12"
-                  step="0.5"
-                  value="3"
+                  max="50"
+                  step="1"
+                  value="8"
+                />
+              </label>
+              <label class="camera-control" for="point-min-radius-control">
+                <span>Minimum screen radius</span>
+                <output id="point-min-radius-value" for="point-min-radius-control">0.75 px</output>
+                <input
+                  type="range"
+                  id="point-min-radius-control"
+                  min="0.25"
+                  max="4"
+                  step="0.25"
+                  value="0.75"
+                />
+              </label>
+              <label class="camera-control" for="point-max-radius-control">
+                <span>Maximum screen radius</span>
+                <output id="point-max-radius-value" for="point-max-radius-control">24 px</output>
+                <input
+                  type="range"
+                  id="point-max-radius-control"
+                  min="4"
+                  max="30"
+                  step="1"
+                  value="24"
                 />
               </label>
             </div>
@@ -325,8 +349,9 @@
     <script src="./pointscape-lod-streaming.js?v=1"></script>
     <script src="./pointscape-data-ingestion.js?v=2"></script>
     <script src="./pointscape-lod-system.js?v=3"></script>
-    <script src="./pointscape-ui-controller.js?v=2"></script>
-    <script src="./node-inspector.js?v=2"></script>
-    <script src="./script.js?v=52"></script>
+    <script src="./pointscape-point-sizing.js?v=1"></script>
+    <script src="./pointscape-ui-controller.js?v=3"></script>
+    <script src="./node-inspector.js?v=3"></script>
+    <script src="./script.js?v=53"></script>
   </body>
 </html>

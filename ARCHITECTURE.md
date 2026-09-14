@@ -32,6 +32,8 @@ classes together during startup.
 - `styles.css`: visual styling and responsive layout.
 - `script.js`: application composition, MapLibre setup, WebGL rendering, stats,
   camera helpers, and compatibility wrappers while the refactor continues.
+- `pointscape-point-sizing.js`: testable perspective-size projection helpers
+  mirrored by the point vertex shader.
 - `pointscape-ui-controller.js`: `PointScapeUiController`, responsible for UI
   event binding and DOM-to-application action routing.
 - `pointscape-data-ingestion.js`: `LasDataIngestionService` for worker-based LAS
@@ -119,6 +121,13 @@ The transform units follow the pinned MapLibre 5.24
    LOD controls change.
 9. Active tile payloads are hydrated from `VolatileTileStore`.
 10. The WebGL layer receives renderable tile buffers and draws the point cloud.
+
+Each tile buffer stores the metres-to-Mercator scale at its geographic anchor.
+During rendering, the vertex shader combines that scale, the configured physical
+radius, the current projection matrix, framebuffer size, and each point's clip
+`w` to obtain its perspective radius. It clamps the result to the configurable
+minimum and maximum screen radii and emits a circular point sprite. The maximum
+is also constrained by the GPU's advertised point-size range.
 
 ## Ownership Boundaries
 

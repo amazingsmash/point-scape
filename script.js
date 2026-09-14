@@ -39,6 +39,9 @@ const pointCloudConfig = {
   visibilityExitMargin: 1.18,
   visibilityMinimumResidenceMs: 220,
   lodTransitionHoldMs: 220,
+  pointRadiusCentimeters: 8,
+  pointMinimumRadiusPixels: 0.75,
+  pointMaximumRadiusPixels: 24,
   parseYieldEveryPoints: 5000,
   progressiveLoadingPreview: false,
   progressiveTilePointInterval: 100000,
@@ -89,8 +92,12 @@ const terrainExaggerationControl = document.querySelector("#terrain-exaggeration
 const terrainExaggerationValue = document.querySelector("#terrain-exaggeration-value");
 const pointOffsetControl = document.querySelector("#point-offset-control");
 const pointOffsetValue = document.querySelector("#point-offset-value");
-const pointSizeControl = document.querySelector("#point-size-control");
-const pointSizeValue = document.querySelector("#point-size-value");
+const pointRadiusControl = document.querySelector("#point-radius-control");
+const pointRadiusValue = document.querySelector("#point-radius-value");
+const pointMinRadiusControl = document.querySelector("#point-min-radius-control");
+const pointMinRadiusValue = document.querySelector("#point-min-radius-value");
+const pointMaxRadiusControl = document.querySelector("#point-max-radius-control");
+const pointMaxRadiusValue = document.querySelector("#point-max-radius-value");
 const lasIndexingModeInputs = document.querySelectorAll(
   "input[name='las-indexing-mode']",
 );
@@ -187,8 +194,12 @@ const pointscapeUiController = new PointScapeUiController({
     terrainExaggerationValue,
     pointOffsetControl,
     pointOffsetValue,
-    pointSizeControl,
-    pointSizeValue,
+    pointRadiusControl,
+    pointRadiusValue,
+    pointMinRadiusControl,
+    pointMinRadiusValue,
+    pointMaxRadiusControl,
+    pointMaxRadiusValue,
     fullResolutionToggle,
     blockBoundsToggle,
     blockDetailsToggle,
@@ -221,7 +232,7 @@ const pointscapeUiController = new PointScapeUiController({
     refreshTileBounds,
     updateDetailBoxesLayer,
     getPointCloudOffsetMeters,
-    getPointSizePixels,
+    syncPointSizingControlsFromConfig,
     setBlockBoundsVisible,
     setBlockDetailsVisible,
     randomizeLasClassColors,
@@ -381,7 +392,7 @@ function initMap() {
     getMetadata: (id) => currentTileIndex.find((tile) => tile.id === id),
     getRecord: (id) => getStoredTileRecord(id),
     project: (lng, lat, tile) => pointscapeLodSystem.projectLngLatToTileMetric(lng, lat, tile),
-    getPointSize: () => getPointSizePixels(),
+    getPointSize: () => getPointMaximumRadiusPixels() * 2,
   });
 
   window.mapLibreMap.addControl(
@@ -542,7 +553,14 @@ function createWebGlPointCloudLayer() {
       );
       this.matrixLocation = gl.getUniformLocation(this.program, "u_matrix");
       this.anchorClipLocation = gl.getUniformLocation(this.program, "u_anchor_clip");
-      this.pointSizeLocation = gl.getUniformLocation(this.program, "u_point_size");
+      this.pointRadiusMetersLocation = gl.getUniformLocation(this.program, "u_point_radius_meters");
+      this.minimumPointRadiusLocation = gl.getUniformLocation(this.program, "u_min_point_radius_px");
+      this.maximumPointRadiusLocation = gl.getUniformLocation(this.program, "u_max_point_radius_px");
+      this.projectionPixelsPerMercatorLocation = gl.getUniformLocation(
+        this.program,
+        "u_projection_pixels_per_mercator",
+      );
+      this.metersToMercatorLocation = gl.getUniformLocation(this.program, "u_meters_to_mercator");
       this.depthBiasLocation = gl.getUniformLocation(this.program, "u_depth_bias");
       this.classCountLocation = gl.getUniformLocation(this.program, "u_class_count");
       this.classCodesLocation = gl.getUniformLocation(
@@ -672,7 +690,29 @@ function createWebGlPointCloudLayer() {
       gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
       this.pickMatrix = Array.from(matrix);
       schedulePointCloudTileRefreshAfterRenderedFrame();
-      gl.uniform1f(this.pointSizeLocation, getPointSizePixels());
+      const canvas = gl.canvas;
+      const pixelRatio = Math.max(1, canvas.width / Math.max(1, canvas.clientWidth));
+      const pointSizeRange = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
+      const hardwareMaximumRadius = Math.max(0.5, pointSizeRange[1] / 2);
+      const minimumRadius = Math.min(
+        getPointMinimumRadiusPixels() * pixelRatio,
+        hardwareMaximumRadius,
+      );
+      const maximumRadius = Math.min(
+        Math.max(minimumRadius, getPointMaximumRadiusPixels() * pixelRatio),
+        hardwareMaximumRadius,
+      );
+      gl.uniform1f(this.pointRadiusMetersLocation, getPointPhysicalRadiusMeters());
+      gl.uniform1f(this.minimumPointRadiusLocation, minimumRadius);
+      gl.uniform1f(this.maximumPointRadiusLocation, maximumRadius);
+      gl.uniform1f(
+        this.projectionPixelsPerMercatorLocation,
+        PointScapePointSizing.getProjectionPixelsPerMercator(
+          matrix,
+          gl.drawingBufferWidth,
+          gl.drawingBufferHeight,
+        ),
+      );
       gl.uniform1f(this.depthBiasLocation, getDepthBias());
       setPointCloudClassColorUniforms(gl, this);
 
@@ -955,6 +995,7 @@ function createPointCloudTileBuffer(gl, tile, map, useTerrainElevation) {
     buffer,
     pointCount: pointBuffer.pointCount,
     anchorMercator: pointBuffer.anchorMercator,
+    metersToMercator: pointBuffer.metersToMercator,
     pickPositions: new Float32Array(pointBuffer.data),
   };
 }
@@ -1108,6 +1149,7 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
       layer.anchorClipLocation,
       multiplyMatrixAndMercatorPoint(matrix, tileBuffer.anchorMercator),
     );
+    gl.uniform1f(layer.metersToMercatorLocation, tileBuffer.metersToMercator || 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, tileBuffer.buffer);
     gl.vertexAttribPointer(
       layer.positionLocation,
@@ -1136,13 +1178,14 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
   const classifications = new Uint8Array(data);
   const verticalExaggeration = useTerrainElevation ? getTerrainExaggeration() : 1;
   const pointOffsetMeters = getPointCloudOffsetMeters();
-  const anchorMercator = createPointCloudMercatorAnchor(
+  const anchor = createPointCloudMercatorAnchor(
     points,
     map,
     useTerrainElevation,
     verticalExaggeration,
     pointOffsetMeters,
   );
+  const anchorMercator = anchor.coordinates;
 
   let index = 0;
   forEachPointInCollection(points, (point) => {
@@ -1172,6 +1215,7 @@ function createPointCloudBuffer(points, map, useTerrainElevation) {
     data,
     pointCount,
     anchorMercator,
+    metersToMercator: anchor.metersToMercator,
   };
 }
 
@@ -1183,7 +1227,7 @@ function createPointCloudMercatorAnchor(
   pointOffsetMeters,
 ) {
   if (!getPointCollectionCount(points)) {
-    return [0, 0, 0];
+    return { coordinates: [0, 0, 0], metersToMercator: 0 };
   }
 
   let minLng = Infinity;
@@ -1218,7 +1262,12 @@ function createPointCloudMercatorAnchor(
     anchorElevation,
   );
 
-  return [anchor.x, anchor.y, anchor.z];
+  return {
+    coordinates: [anchor.x, anchor.y, anchor.z],
+    metersToMercator: typeof anchor.meterInMercatorCoordinateUnits === "function"
+      ? anchor.meterInMercatorCoordinateUnits()
+      : 1 / (40075016.68557849 * Math.max(Math.cos(anchorLat * Math.PI / 180), 0.01)),
+  };
 }
 
 function multiplyMatrixAndMercatorPoint(matrix, anchorMercator = [0, 0, 0]) {
@@ -1347,7 +1396,11 @@ function createPointCloudShaders(isWebGl2) {
         precision highp float;
         uniform mat4 u_matrix;
         uniform vec4 u_anchor_clip;
-        uniform float u_point_size;
+        uniform float u_point_radius_meters;
+        uniform float u_min_point_radius_px;
+        uniform float u_max_point_radius_px;
+        uniform float u_projection_pixels_per_mercator;
+        uniform float u_meters_to_mercator;
         uniform float u_depth_bias;
         uniform int u_class_count;
         uniform float u_class_codes[${maxShaderClassColors}];
@@ -1375,7 +1428,14 @@ function createPointCloudShaders(isWebGl2) {
         void main() {
           gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
           gl_Position.z -= u_depth_bias * gl_Position.w;
-          gl_PointSize = u_point_size;
+          float projected_radius_px =
+            u_point_radius_meters * u_meters_to_mercator *
+            u_projection_pixels_per_mercator / max(abs(gl_Position.w), 0.0000001);
+          gl_PointSize = 2.0 * clamp(
+            projected_radius_px,
+            u_min_point_radius_px,
+            u_max_point_radius_px
+          );
           v_color = getClassColor(a_classification);
         }
       `,
@@ -1401,7 +1461,11 @@ function createPointCloudShaders(isWebGl2) {
       precision highp float;
       uniform mat4 u_matrix;
       uniform vec4 u_anchor_clip;
-      uniform float u_point_size;
+      uniform float u_point_radius_meters;
+      uniform float u_min_point_radius_px;
+      uniform float u_max_point_radius_px;
+      uniform float u_projection_pixels_per_mercator;
+      uniform float u_meters_to_mercator;
       uniform float u_depth_bias;
       uniform int u_class_count;
       uniform float u_class_codes[${maxShaderClassColors}];
@@ -1429,7 +1493,14 @@ function createPointCloudShaders(isWebGl2) {
       void main() {
         gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
         gl_Position.z -= u_depth_bias * gl_Position.w;
-        gl_PointSize = u_point_size;
+        float projected_radius_px =
+          u_point_radius_meters * u_meters_to_mercator *
+          u_projection_pixels_per_mercator / max(abs(gl_Position.w), 0.0000001);
+        gl_PointSize = 2.0 * clamp(
+          projected_radius_px,
+          u_min_point_radius_px,
+          u_max_point_radius_px
+        );
         v_color = getClassColor(a_classification);
       }
     `,
@@ -1823,8 +1894,28 @@ function getPointCloudOffsetMeters() {
   return Number(pointOffsetControl.value) || 0;
 }
 
-function getPointSizePixels() {
-  return Number(pointSizeControl.value) || 3;
+function getPointPhysicalRadiusMeters() {
+  return pointCloudConfig.pointRadiusCentimeters / 100;
+}
+
+function getPointMinimumRadiusPixels() {
+  return pointCloudConfig.pointMinimumRadiusPixels;
+}
+
+function getPointMaximumRadiusPixels() {
+  return Math.max(
+    getPointMinimumRadiusPixels(),
+    pointCloudConfig.pointMaximumRadiusPixels,
+  );
+}
+
+function syncPointSizingControlsFromConfig() {
+  pointRadiusControl.value = String(pointCloudConfig.pointRadiusCentimeters);
+  pointMinRadiusControl.value = String(pointCloudConfig.pointMinimumRadiusPixels);
+  pointMaxRadiusControl.value = String(pointCloudConfig.pointMaximumRadiusPixels);
+  pointRadiusValue.textContent = `${formatNumber(pointCloudConfig.pointRadiusCentimeters, 0)} cm`;
+  pointMinRadiusValue.textContent = `${formatNumber(pointCloudConfig.pointMinimumRadiusPixels, 2)} px`;
+  pointMaxRadiusValue.textContent = `${formatNumber(pointCloudConfig.pointMaximumRadiusPixels, 0)} px`;
 }
 
 function getSelectedLasIndexingMode() {

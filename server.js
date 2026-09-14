@@ -16,6 +16,7 @@ const publicFiles = new Set([
   "/pointscape-lod-streaming.js",
   "/pointscape-data-ingestion.js",
   "/pointscape-lod-system.js",
+  "/pointscape-point-sizing.js",
   "/pointscape-ui-controller.js",
   "/node-inspector.js",
   "/script.js",

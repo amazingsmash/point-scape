@@ -17,6 +17,7 @@
 
       actions.renderClassificationLegend();
       actions.syncLodControlsFromConfig();
+      actions.syncPointSizingControlsFromConfig();
       actions.renderPointCloudStats();
 
       elements.menuToggle.addEventListener("click", () => {
@@ -66,11 +67,28 @@
         actions.updateDetailBoxesLayer();
       });
 
-      elements.pointSizeControl.addEventListener("input", () => {
-        const size = actions.getPointSizePixels();
-        elements.pointSizeValue.textContent = `${size.toFixed(size % 1 ? 1 : 0)} px`;
+      const updatePointSizing = () => {
+        actions.config.pointRadiusCentimeters = actions.readNumericControl(
+          elements.pointRadiusControl,
+          actions.config.pointRadiusCentimeters,
+        );
+        actions.config.pointMinimumRadiusPixels = actions.readNumericControl(
+          elements.pointMinRadiusControl,
+          actions.config.pointMinimumRadiusPixels,
+        );
+        actions.config.pointMaximumRadiusPixels = Math.max(
+          actions.config.pointMinimumRadiusPixels,
+          actions.readNumericControl(
+            elements.pointMaxRadiusControl,
+            actions.config.pointMaximumRadiusPixels,
+          ),
+        );
+        actions.syncPointSizingControlsFromConfig();
         actions.getMap()?.triggerRepaint();
-      });
+      };
+      elements.pointRadiusControl.addEventListener("input", updatePointSizing);
+      elements.pointMinRadiusControl.addEventListener("input", updatePointSizing);
+      elements.pointMaxRadiusControl.addEventListener("input", updatePointSizing);
 
       elements.blockBoundsToggle.addEventListener("change", () => {
         actions.setBlockBoundsVisible(elements.blockBoundsToggle.checked);

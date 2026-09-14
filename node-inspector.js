@@ -9,10 +9,12 @@
 
   // Uses the exact anchor-relative vertices uploaded to the map's GPU buffer.
   // Pick the frontmost sprite under the pointer, or the closest within tolerance.
-  function pickPoint(buffers, matrix, x, y, width, height, pointSize = 3, pixelRatio = 1) {
+  function pickPoint(buffers, matrix, x, y, width, height, pointSize = 3, _pixelRatio = 1) {
     if (!matrix || !width || !height) return null;
-    const radius = Math.max(6, pointSize / pixelRatio / 2);
-    const spriteRadius = Math.max(1, pointSize / pixelRatio / 2);
+    // pointSize is expressed in CSS pixels. With perspective sizing the caller
+    // supplies the maximum diameter so every rendered sprite remains pickable.
+    const radius = Math.max(6, pointSize / 2);
+    const spriteRadius = Math.max(1, pointSize / 2);
     let best = null;
     for (const tile of buffers || []) {
       const data = tile.pickPositions;
