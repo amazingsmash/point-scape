@@ -23,14 +23,20 @@
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
+      this.fullPointCounts = new Map();
       this.visibilityByTileId = new Map();
+      this.usedPointBudget = 0;
+      this.remainingPointBudget = this.config.residentPointBudget || 500000;
     }
 
     reset() {
       this.activeTileIds = new Set();
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
+      this.fullPointCounts = new Map();
       this.visibilityByTileId = new Map();
+      this.usedPointBudget = 0;
+      this.remainingPointBudget = this.config.residentPointBudget || 500000;
     }
 
     selectActiveTiles(records, map) {
@@ -39,26 +45,28 @@
       this.screenBounds = new Map();
       this.visibilityEvaluations = new Map();
       const useAccumulatedLod = this.getSummary()?.indexingMode === "m3no";
-      const { activeTiles, nextExpandedTileIds, nextFullTileIds, nextFullPointCounts } =
-        this.tileSelection.selectActiveTiles(records, {
-          useAccumulatedLod,
-          pointBudget: this.config.residentPointBudget || 500000,
-          getTilePointCost: (tile) => tile.sampledPointCount || 0,
-          getFullPointCost: (tile) => tile.fullPointCount || 0,
-          shouldUseFull: (tile) => this.isFullEnabled() && tile.fullPointCount > 0 &&
-            this.shouldExpandTile(tile, map, mapCenter, this.fullResolutionTileIds.has(tile.id)),
-          previousActiveTileIds: this.activeTileIds,
-          previousFullTileIds: this.fullResolutionTileIds,
-          previousExpandedTileIds: this.expandedTileIds,
-          swapHysteresis: this.config.lodSwapHysteresisRatio ?? 0.2,
-          isTileVisible: (tile) => this.isTileLoadableInMap(tile, map, mapCenter),
-          shouldExpandTile: (tile) => this.shouldExpandTile(tile, map, mapCenter),
-          getTilePriority: (tile) => this.getVisualPriority(tile, map, mapCenter),
-        });
+      const selectionResult = this.tileSelection.selectActiveTiles(records, {
+        useAccumulatedLod,
+        pointBudget: this.config.residentPointBudget || 500000,
+        getTilePointCost: (tile) => tile.sampledPointCount || 0,
+        getFullPointCost: (tile) => tile.fullPointCount || 0,
+        shouldUseFull: (tile) => this.isFullEnabled() && tile.fullPointCount > 0 &&
+          this.shouldExpandTile(tile, map, mapCenter, this.fullResolutionTileIds.has(tile.id)),
+        previousActiveTileIds: this.activeTileIds,
+        previousFullTileIds: this.fullResolutionTileIds,
+        previousExpandedTileIds: this.expandedTileIds,
+        swapHysteresis: this.config.lodSwapHysteresisRatio ?? 0.2,
+        isTileVisible: (tile) => this.isTileLoadableInMap(tile, map, mapCenter),
+        shouldExpandTile: (tile) => this.shouldExpandTile(tile, map, mapCenter),
+        getTilePriority: (tile) => this.getVisualPriority(tile, map, mapCenter),
+      });
+      const { activeTiles, nextExpandedTileIds, nextFullTileIds, nextFullPointCounts } = selectionResult;
 
       this.expandedTileIds = nextExpandedTileIds;
       this.fullResolutionTileIds = nextFullTileIds;
       this.fullPointCounts = nextFullPointCounts;
+      this.usedPointBudget = selectionResult.usedPointBudget;
+      this.remainingPointBudget = selectionResult.remainingPointBudget;
       this.activeTileIds = new Set(activeTiles.map((tile) => tile.id));
 
       const recordIds = new Set(records.map(tile => tile.id));
@@ -181,6 +189,85 @@
 
     getVisualPriority(tile, map, mapCenter = map?.getCenter?.()) {
       return this.getTileScreenSpaceMetric(tile, map, mapCenter).value;
+    }
+
+    getTileLodDiagnostics(tile, map, mapCenter = map?.getCenter?.()) {
+      const now = this.now();
+      const previous = this.visibilityByTileId.get(tile.id);
+      const active = this.activeTileIds.has(tile.id);
+      const expanded = this.expandedTileIds.has(tile.id);
+      const fullResolution = this.fullResolutionTileIds.has(tile.id);
+      const enterMargin = this.config.visibilityEnterMargin ?? 1.05;
+      const exitMargin = Math.max(enterMargin, this.config.visibilityExitMargin ?? 1.18);
+      const appliedMargin = previous?.visible ? exitMargin : enterMargin;
+      const screen = this.getScreenBounds(tile, appliedMargin);
+      const rawVisible = screen
+        ? screen.visible
+        : !this.isTileCompletelyBehindMapCamera(tile, map, mapCenter);
+      const minimumResidenceMs = this.config.visibilityMinimumResidenceMs ?? 220;
+      const lastRawVisibleAt = rawVisible ? now : previous?.lastRawVisibleAt ?? -Infinity;
+      const residenceRemainingMs = !rawVisible && previous?.visible
+        ? Math.max(0, minimumResidenceMs - (now - lastRawVisibleAt))
+        : 0;
+      const stableVisible = rawVisible || residenceRemainingMs > 0;
+      const diagonalPixels = rawVisible
+        ? Math.max(0, screen?.diagonalPixels || 0)
+        : stableVisible
+          ? previous?.metric || 0
+          : 0;
+      const viewportHeightPixels = this.getMapViewportHeightPixels(map);
+      const viewportWidthPixels = Math.max(
+        map?.getContainer?.()?.clientWidth || globalScope.innerWidth || 1,
+        1,
+      );
+      const verticalFovRadians = this.getMapVerticalFovRadians(map);
+      const focalLengthPixels = viewportHeightPixels / (2 * Math.tan(verticalFovRadians / 2));
+      const configuredThresholdDegrees = this.config.fullResolutionAngularDiagonalDegrees;
+      const configuredThresholdPixels = this.getAngularThresholdPixels(map);
+      const collapseHysteresisRatio = this.config.tileCollapseHysteresisRatio ?? 0.1;
+      const stableThresholdPixels = configuredThresholdPixels *
+        (expanded ? 1 - collapseHysteresisRatio : 1);
+      const diagonalMeters = this.getTileDiagonalMeters(tile);
+      const distanceMeters = this.getTileDistanceMeters(tile, mapCenter, map);
+      const geometricAngleDegrees = this.getTileAngularDiagonalDegrees(tile, map, mapCenter);
+      const projectedEquivalentAngleDegrees = 2 * Math.atan(
+        diagonalPixels / Math.max(2 * focalLengthPixels, Number.EPSILON),
+      ) * 180 / Math.PI;
+      const cameraPosition = this.getApproxCameraMetricPosition(map, mapCenter, tile);
+      const passesRefinementThreshold = stableVisible && diagonalPixels >= stableThresholdPixels;
+      const samplePointCost = tile.sampledPointCount || 0;
+      const fullPointCost = tile.fullPointCount || 0;
+      const admittedFullPointCount = this.fullPointCounts?.get(tile.id) ||
+        (fullResolution ? fullPointCost : 0);
+
+      let decisionReason = "El nodo está fuera del volumen visible de la cámara.";
+      if (active) decisionReason = expanded
+        ? "El selector global mantiene el nodo activo mientras admite detalle descendiente."
+        : "El selector global ha admitido este nodo dentro del presupuesto.";
+      else if (expanded) decisionReason = "El nodo se ha refinado y su cobertura corresponde a sus descendientes.";
+      else if (passesRefinementThreshold) decisionReason =
+        "Supera el umbral visual, pero la jerarquía o el presupuesto global no lo han admitido.";
+      else if (stableVisible) decisionReason = "Es visible, pero no supera todavía el umbral de refinamiento.";
+
+      return {
+        decision: { active, expanded, fullResolution, passesRefinementThreshold, reason: decisionReason },
+        visibility: { rawVisible, stableVisible, appliedMargin, enterMargin, exitMargin,
+          minimumResidenceMs, residenceRemainingMs },
+        projection: { ...screen, diagonalPixels, viewportWidthPixels, viewportHeightPixels,
+          focalLengthPixels, verticalFovDegrees: verticalFovRadians * 180 / Math.PI,
+          projectedEquivalentAngleDegrees },
+        geometry: { diagonalMeters, distanceMeters, geometricAngleDegrees, cameraPosition },
+        threshold: { configuredDegrees: configuredThresholdDegrees, configuredPixels: configuredThresholdPixels,
+          stablePixels: stableThresholdPixels, collapseHysteresisRatio },
+        budget: { pointBudget: this.config.residentPointBudget || 500000,
+          usedPointBudget: this.usedPointBudget, remainingPointBudget: this.remainingPointBudget,
+          samplePointCost, fullPointCost, admittedFullPointCount,
+          swapHysteresisRatio: this.config.lodSwapHysteresisRatio ?? 0.2 },
+        hierarchy: { parentId: tile.parentId || null, childCount: tile.childIds?.length || 0,
+          depth: tile.depth || 0 },
+        camera: { zoom: map?.getZoom?.(), pitchDegrees: map?.getPitch?.(),
+          bearingDegrees: map?.getBearing?.() },
+      };
     }
 
     getTileCrs(tile) {

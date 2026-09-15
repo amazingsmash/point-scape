@@ -43,7 +43,7 @@ const pointCloudConfig = {
   pointMinimumRadiusPixels: 0.75,
   pointMaximumRadiusPixels: 24,
   parseYieldEveryPoints: 5000,
-  progressiveLoadingPreview: false,
+  progressiveLoadingPreview: true,
   progressiveTilePointInterval: 100000,
   progressiveTileMinimumMs: 300,
   indexedDbWriteBatchSize: 24,
@@ -393,6 +393,10 @@ function initMap() {
     getRecord: (id) => getStoredTileRecord(id),
     project: (lng, lat, tile) => pointscapeLodSystem.projectLngLatToTileMetric(lng, lat, tile),
     getPointSize: () => getPointMaximumRadiusPixels() * 2,
+    getLodDiagnostics: (tile) => pointscapeLodSystem.getTileLodDiagnostics(
+      tile,
+      window.mapLibreMap,
+    ),
   });
 
   window.mapLibreMap.addControl(
@@ -2169,12 +2173,12 @@ window.pointscapeTileDb = {
   getAllTiles: async () => currentTileIndex,
 };
 
-function schedulePointCloudTileRefresh() {
+function schedulePointCloudTileRefresh(options = {}) {
   if (!currentPointCloudTiles.length) {
     return;
   }
 
-  applyPointCloudTileSelection();
+  applyPointCloudTileSelection(options);
 }
 
 function schedulePointCloudTileRefreshAfterRenderedFrame() {
@@ -3211,7 +3215,7 @@ async function loadLasFiles(files) {
 
       await saveTileRecords(tileRecords);
       integrateTileMetadata(tileRecords);
-      schedulePointCloudTileRefresh();
+      schedulePointCloudTileRefresh({ updateStatus: true });
 
       const percent =
         details.total > 0 ? Math.round((details.processed / details.total) * 100) : 0;

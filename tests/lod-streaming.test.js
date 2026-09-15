@@ -12,6 +12,8 @@ test('M3NO admits the close child even when all siblings cannot fit', () => {
   const records = [tile('r', null, ['near', 'far'], 10), tile('near', 'r', [], 50, 100), tile('far', 'r', [], 50, 1)];
   const result = selectActiveTiles(records, { ...selectionOptions, pointBudget: 60 });
   assert.deepEqual(result.activeTiles.map(t => t.id), ['r', 'near']);
+  assert.equal(result.usedPointBudget, 60);
+  assert.equal(result.remainingPointBudget, 0);
 });
 
 test('full payload competes for remaining display budget instead of taxing every leaf', () => {
@@ -94,7 +96,11 @@ test('frustum supports separate enter and exit margins at the viewport edge', ()
     .flatMap(y => [-0.01,0.01].map(z => ({ x:x+dx, y, z }))));
   assert.equal(projectScreenBounds(box(1.08), matrix, 100, 100, { margin:1.05 }).visible, false);
   assert.equal(projectScreenBounds(box(1.08), matrix, 100, 100, { margin:1.18 }).visible, true);
-  assert.ok(projectScreenBounds(box(0), matrix, 100, 100).diagonalPixels > 0);
+  const centered = projectScreenBounds(box(0), matrix, 100, 100);
+  assert.ok(centered.diagonalPixels > 0);
+  assert.ok(centered.widthPixels > 0);
+  assert.ok(centered.heightPixels > 0);
+  assert.deepEqual(centered.ndcBounds, { minX:-0.01, maxX:0.01, minY:-0.01, maxY:0.01 });
 });
 
 test('streamer retains the previous complete frame until its successor is resident', async () => {

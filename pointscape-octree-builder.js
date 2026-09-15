@@ -52,16 +52,22 @@ async function parseLasFileProgressively(file, options) {
         : "standard";
   const memoryProfiles = {
     compact: { workingSetBytes: 64 * 1024 * 1024, blockBytes: 4 * 1024 * 1024,
-      stagingBlockBytes: 512 * 1024, scratchBatchBytes: 8 * 1024 * 1024, leafPointLimit: 50000 },
+      stagingBlockBytes: 512 * 1024, scratchBatchBytes: 8 * 1024 * 1024,
+      outputBatchBytes: 4 * 1024 * 1024, leafPointLimit: 50000 },
     balanced: { workingSetBytes: 96 * 1024 * 1024, blockBytes: 8 * 1024 * 1024,
-      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 12 * 1024 * 1024, leafPointLimit: 75000 },
+      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 12 * 1024 * 1024,
+      outputBatchBytes: 8 * 1024 * 1024, leafPointLimit: 75000 },
     standard: { workingSetBytes: 160 * 1024 * 1024, blockBytes: 12 * 1024 * 1024,
-      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 20 * 1024 * 1024, leafPointLimit: 125000 },
+      stagingBlockBytes: 1024 * 1024, scratchBatchBytes: 20 * 1024 * 1024,
+      outputBatchBytes: 12 * 1024 * 1024, leafPointLimit: 125000 },
     large: { workingSetBytes: 256 * 1024 * 1024, blockBytes: 16 * 1024 * 1024,
-      stagingBlockBytes: 2 * 1024 * 1024, scratchBatchBytes: 32 * 1024 * 1024, leafPointLimit: 200000 },
+      stagingBlockBytes: 2 * 1024 * 1024, scratchBatchBytes: 32 * 1024 * 1024,
+      outputBatchBytes: 16 * 1024 * 1024, leafPointLimit: 200000 },
   };
   const memoryProfile = memoryProfiles[memoryTier];
-  const { blockBytes, stagingBlockBytes, scratchBatchBytes, leafPointLimit: leafLimit } = memoryProfile;
+  const { blockBytes, stagingBlockBytes, scratchBatchBytes, outputBatchBytes,
+    leafPointLimit: leafLimit } = memoryProfile;
+  const outputBatchRecordLimit = Math.max(1, pointCloudConfig.indexedDbWriteBatchSize || 24);
   const prefix = new DataView(await file.slice(0, 375).arrayBuffer());
   if (prefix.byteLength < 227 || readAscii(prefix, 0, 4) !== "LASF") {
     throw new Error("Invalid or truncated LAS header.");
@@ -116,7 +122,14 @@ async function parseLasFileProgressively(file, options) {
   let peakBufferedBytes = 0;
   let activeReadBytes = 0;
   let activeWriteBatchBytes = 0;
+  let activeOutputBatchBytes = 0;
+  let inFlightOutputBytes = 0;
   const pending = [{ tile: root, blocks: 0, isRoot: true, pointCount: header.pointCount }];
+  let pendingIndex = 0;
+  let outputBatch = [];
+  let outputBatchDetails = null;
+  let tileWritePromise = null;
+  let tileWriteFailure = null;
   const emitProgress = (phase, scanned = 0) => options.onProgress?.(completedPoints, header.pointCount, {
     phase, scanned, nodes: metadata.length, blockBytes,
     peakBufferedBytes, leafPointLimit: leafLimit, memoryTier,
@@ -133,6 +146,58 @@ async function parseLasFileProgressively(file, options) {
     if (scratch.removeMany) await scratch.removeMany(keys);
     else for (const key of keys) await scratch.remove(key);
   };
+
+  function updatePeakBufferedBytes(stagingBytes = 0) {
+    peakBufferedBytes = Math.max(peakBufferedBytes, activeReadBytes + activeWriteBatchBytes +
+      activeOutputBatchBytes + inFlightOutputBytes + stagingBytes);
+  }
+
+  async function finishInFlightTileWrite() {
+    if (!tileWritePromise) return;
+    await tileWritePromise;
+    tileWritePromise = null;
+    inFlightOutputBytes = 0;
+    if (tileWriteFailure) {
+      const error = tileWriteFailure;
+      tileWriteFailure = null;
+      throw error;
+    }
+  }
+
+  async function flushOutputBatch() {
+    if (!outputBatch.length) return;
+    // Exactly one persistent write may be active. While it runs, parsing can fill
+    // one bounded second buffer; reaching this point applies byte backpressure.
+    await finishInFlightTileWrite();
+    const records = outputBatch;
+    const details = outputBatchDetails;
+    const bytes = activeOutputBatchBytes;
+    outputBatch = [];
+    outputBatchDetails = null;
+    activeOutputBatchBytes = 0;
+    inFlightOutputBytes = bytes;
+    updatePeakBufferedBytes();
+    tileWriteFailure = null;
+    tileWritePromise = Promise.resolve().then(() => options.onTiles(records, details)).catch((error) => {
+      tileWriteFailure = error;
+    });
+  }
+
+  async function queueTileRecord(record, details, flushImmediately = false) {
+    const bytes = getTileRecordPayloadBytes(record);
+    if (outputBatch.length && (activeOutputBatchBytes + bytes > outputBatchBytes ||
+        outputBatch.length >= outputBatchRecordLimit)) {
+      await flushOutputBatch();
+    }
+    outputBatch.push(record);
+    outputBatchDetails = details;
+    activeOutputBatchBytes += bytes;
+    updatePeakBufferedBytes();
+    if (flushImmediately || activeOutputBatchBytes >= outputBatchBytes ||
+        outputBatch.length >= outputBatchRecordLimit) {
+      await flushOutputBatch();
+    }
+  }
 
   async function* blocksFor(node) {
     if (node.isRoot) {
@@ -179,9 +244,12 @@ async function parseLasFileProgressively(file, options) {
     };
   }
   try {
-    while (pending.length) {
-      if (metadata.length + pending.length > 20000) throw new Error("LAS index exceeds the 20,000-node metadata budget. Split the file into smaller areas.");
-      const node = pending.pop();
+    while (pendingIndex < pending.length) {
+      if (tileWriteFailure) await finishInFlightTileWrite();
+      if (metadata.length + pending.length - pendingIndex > 20000) throw new Error("LAS index exceeds the 20,000-node metadata budget. Split the file into smaller areas.");
+      // Breadth-first construction makes complete coarse coverage available before
+      // spending time on deep detail in a single branch.
+      const node = pending[pendingIndex++];
       const tile = node.tile;
       const spatialEnd = tile.depth >= maxDepth || tile.diagonalMeters <= pointCloudConfig.tileMinDiagonalMeters;
       const leaf = node.pointCount <= leafLimit;
@@ -193,7 +261,7 @@ async function parseLasFileProgressively(file, options) {
       function updatePeak() {
         const stagingBytes = Array.from(children.values(), (child) => child.bytes?.byteLength || 0)
           .reduce((sum, bytes) => sum + bytes, 0);
-        peakBufferedBytes = Math.max(peakBufferedBytes, activeReadBytes + activeWriteBatchBytes + stagingBytes);
+        updatePeakBufferedBytes(stagingBytes);
       }
       async function flushWriteBatch() {
         if (!writeBatch.length) return;
@@ -310,7 +378,8 @@ async function parseLasFileProgressively(file, options) {
         sourcePointCount: header.pointCount, rootTile: tileMetadata });
       if (leaf) completedPoints += tile.fullPointCount;
       if (!options.onTiles) throw new Error("Progressive LAS loading requires a persistent tile sink.");
-      await options.onTiles([record], { processed: completedPoints, total: header.pointCount, phase: "saving" });
+      await queueTileRecord(record,
+        { processed: completedPoints, total: header.pointCount, phase: "saving" }, node.isRoot);
       tile.points = [];
       tile.fullPoints = [];
       tile.cellSamples?.clear();
@@ -320,10 +389,13 @@ async function parseLasFileProgressively(file, options) {
       }
       emitProgress("saved");
     }
+    await flushOutputBatch();
+    await finishInFlightTileWrite();
     options.onProgress?.(header.pointCount, header.pointCount, { phase: "complete", peakBufferedBytes, nodes: metadata.length });
     return { fileIndex, crs, crsLabel: crs.label, points: [], tiles: metadata, tileRecords: [],
       sourcePointCount: header.pointCount, validPointCount, streamed: true,
-      memoryProfile: { ...memoryProfile, memoryTier, peakBufferedBytes, singlePassNodes: true } };
+      memoryProfile: { ...memoryProfile, memoryTier, peakBufferedBytes, singlePassNodes: true,
+        outputBatchRecordLimit, maxInFlightTileBatches: 1, traversal: "breadth-first" } };
   } finally {
     await scratch.close();
   }
@@ -583,6 +655,14 @@ function packPoints(points) {
     lngLatAlt,
     classifications,
   };
+}
+
+function getTileRecordPayloadBytes(record) {
+  return getPointSetPayloadBytes(record?.points) + getPointSetPayloadBytes(record?.fullPoints);
+}
+
+function getPointSetPayloadBytes(pointSet) {
+  return (pointSet?.lngLatAlt?.byteLength || 0) + (pointSet?.classifications?.byteLength || 0);
 }
 
 function collectResultTransferList(result) {

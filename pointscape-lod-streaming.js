@@ -33,19 +33,28 @@
     const planes = [p => p[0]+margin*p[3], p => margin*p[3]-p[0],
       p => p[1]+margin*p[3], p => margin*p[3]-p[1], p => p[2]+p[3], p => p[3]-p[2]];
     if (planes.some(plane => clips.every(p => plane(p) < 0))) {
-      return { visible: false, area: 0, diagonalPixels: 0 };
+      return { visible: false, area: 0, widthPixels: 0, heightPixels: 0,
+        diagonalPixels: 0, margin, intersectsEyePlane: false, ndcBounds: null };
     }
     if (clips.some(p => p[3] <= 0)) {
-      return { visible: true, area: width * height, diagonalPixels: Math.hypot(width, height) };
+      return { visible: true, area: width * height, widthPixels: width,
+        heightPixels: height, diagonalPixels: Math.hypot(width, height), margin,
+        intersectsEyePlane: true, ndcBounds: { minX:-1, maxX:1, minY:-1, maxY:1 } };
     }
     const xs = clips.map(p => p[0]/p[3]), ys = clips.map(p => p[1]/p[3]);
-    const span = values => Math.max(0, Math.min(1, Math.max(...values)) - Math.max(-1, Math.min(...values)));
-    const projectedWidth = span(xs) * width / 2;
-    const projectedHeight = span(ys) * height / 2;
+    const ndcBounds = { minX:Math.max(-1,Math.min(...xs)), maxX:Math.min(1,Math.max(...xs)),
+      minY:Math.max(-1,Math.min(...ys)), maxY:Math.min(1,Math.max(...ys)) };
+    const projectedWidth = Math.max(0, ndcBounds.maxX-ndcBounds.minX) * width / 2;
+    const projectedHeight = Math.max(0, ndcBounds.maxY-ndcBounds.minY) * height / 2;
     return {
       visible: true,
       area: Math.max(1, projectedWidth * projectedHeight),
+      widthPixels: projectedWidth,
+      heightPixels: projectedHeight,
       diagonalPixels: Math.max(1, Math.hypot(projectedWidth, projectedHeight)),
+      margin,
+      intersectsEyePlane: false,
+      ndcBounds,
     };
   }
 

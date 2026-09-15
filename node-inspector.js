@@ -80,6 +80,108 @@
       radius: Math.max(1, Math.hypot(...dimensions) / 2), count };
   }
 
+  function formatDiagnosticNumber(value, digits = 2) {
+    if (value === Infinity) return "∞";
+    if (!Number.isFinite(value)) return "—";
+    return value.toLocaleString("es-ES", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
+  function createLodDiagnosticGroups(diagnostics, selection = {}) {
+    if (!diagnostics) return [];
+    const yesNo = (value) => value ? "Sí" : "No";
+    const px = (value) => `${formatDiagnosticNumber(value)} px`;
+    const degrees = (value) => `${formatDiagnosticNumber(value, 3)}°`;
+    const meters = (value) => `${formatDiagnosticNumber(value)} m`;
+    const integer = (value) => Number.isFinite(value) ? value.toLocaleString("es-ES") : "—";
+    const { decision = {}, visibility = {}, projection = {}, geometry = {}, threshold = {},
+      budget = {}, hierarchy = {}, camera = {} } = diagnostics;
+    const ndc = projection.ndcBounds;
+    const cameraPosition = geometry.cameraPosition;
+    return [
+      { title: "Decisión", rows: [
+        ["Resultado final", decision.active ? "Mostrado por el selector" : "No seleccionado"],
+        ["Motivo", decision.reason || "—"],
+        ["Representación pulsada", selection.source === "full" ? "Resolución completa" : "Muestra"],
+        ["Nodo activo", yesNo(decision.active)],
+        ["Nodo expandido", yesNo(decision.expanded)],
+        ["Resolución completa admitida", yesNo(decision.fullResolution)],
+        ["Supera el umbral estable", yesNo(decision.passesRefinementThreshold)],
+      ] },
+      { title: "Proyección y visibilidad", rows: [
+        ["Visible en el frustum", yesNo(visibility.rawVisible)],
+        ["Visibilidad estabilizada", yesNo(visibility.stableVisible)],
+        ["Margen aplicado", formatDiagnosticNumber(visibility.appliedMargin, 3)],
+        ["Margen entrada / salida", `${formatDiagnosticNumber(visibility.enterMargin, 3)} / ${formatDiagnosticNumber(visibility.exitMargin, 3)}`],
+        ["Retención temporal restante", `${formatDiagnosticNumber(visibility.residenceRemainingMs, 0)} ms`],
+        ["Viewport", `${formatDiagnosticNumber(projection.viewportWidthPixels, 0)} × ${formatDiagnosticNumber(projection.viewportHeightPixels, 0)} px`],
+        ["Rectángulo proyectado", `${formatDiagnosticNumber(projection.widthPixels)} × ${formatDiagnosticNumber(projection.heightPixels)} px`],
+        ["Área proyectada", `${formatDiagnosticNumber(projection.area)} px²`],
+        ["Diagonal proyectada / prioridad", px(projection.diagonalPixels)],
+        ["Límites NDC", ndc ? `X ${formatDiagnosticNumber(ndc.minX, 3)}…${formatDiagnosticNumber(ndc.maxX, 3)} · Y ${formatDiagnosticNumber(ndc.minY, 3)}…${formatDiagnosticNumber(ndc.maxY, 3)}` : "—"],
+        ["Cruza el plano de cámara", yesNo(projection.intersectsEyePlane)],
+      ] },
+      { title: "Ángulos y umbrales", rows: [
+        ["Diagonal física 3D", meters(geometry.diagonalMeters)],
+        ["Distancia mínima cámara-caja", meters(geometry.distanceMeters)],
+        ["Ángulo geométrico estimado", degrees(geometry.geometricAngleDegrees)],
+        ["Ángulo equivalente proyectado", degrees(projection.projectedEquivalentAngleDegrees)],
+        ["FOV vertical", degrees(projection.verticalFovDegrees)],
+        ["Distancia focal", px(projection.focalLengthPixels)],
+        ["Umbral configurado", degrees(threshold.configuredDegrees)],
+        ["Umbral convertido a pantalla", px(threshold.configuredPixels)],
+        ["Umbral estable con histéresis", px(threshold.stablePixels)],
+        ["Histéresis de colapso", `${formatDiagnosticNumber((threshold.collapseHysteresisRatio || 0) * 100, 1)} %`],
+      ] },
+      { title: "Presupuesto y jerarquía", rows: [
+        ["Presupuesto total en pantalla", `${integer(budget.pointBudget)} puntos`],
+        ["Presupuesto utilizado", `${integer(budget.usedPointBudget)} puntos`],
+        ["Presupuesto restante", `${integer(budget.remainingPointBudget)} puntos`],
+        ["Coste de la muestra", `${integer(budget.samplePointCost)} puntos`],
+        ["Coste de resolución completa", `${integer(budget.fullPointCost)} puntos`],
+        ["Detalle completo admitido", `${integer(budget.admittedFullPointCount)} puntos`],
+        ["Histéresis de prioridad", `${formatDiagnosticNumber((budget.swapHysteresisRatio || 0) * 100, 1)} %`],
+        ["Profundidad", integer(hierarchy.depth)],
+        ["Nodo padre", hierarchy.parentId || "Raíz"],
+        ["Hijos", integer(hierarchy.childCount)],
+      ] },
+      { title: "Cámara", rows: [
+        ["Zoom", formatDiagnosticNumber(camera.zoom, 3)],
+        ["Pitch", degrees(camera.pitchDegrees)],
+        ["Bearing", degrees(camera.bearingDegrees)],
+        ["Posición métrica aproximada", cameraPosition
+          ? `${formatDiagnosticNumber(cameraPosition.x)}, ${formatDiagnosticNumber(cameraPosition.y)}, ${formatDiagnosticNumber(cameraPosition.z)} m`
+          : "—"],
+      ] },
+    ];
+  }
+
+  function renderLodDiagnostics(container, diagnostics, selection) {
+    container.textContent = "";
+    if (!diagnostics) {
+      container.textContent = "No hay diagnóstico LOD disponible para este nodo.";
+      return;
+    }
+    const state = document.createElement("p");
+    state.className = `node-inspector-lod-state ${diagnostics.decision.active ? "is-active" : "is-inactive"}`;
+    state.textContent = diagnostics.decision.reason;
+    container.appendChild(state);
+    for (const group of createLodDiagnosticGroups(diagnostics, selection)) {
+      const section = document.createElement("section");
+      const heading = document.createElement("h4");
+      const list = document.createElement("dl");
+      heading.textContent = group.title;
+      for (const [label, value] of group.rows) {
+        const term = document.createElement("dt");
+        const description = document.createElement("dd");
+        term.textContent = label;
+        description.textContent = value;
+        list.append(term, description);
+      }
+      section.append(heading, list);
+      container.appendChild(section);
+    }
+  }
+
   class Controller {
     constructor(options) {
       Object.assign(this, options);
@@ -144,7 +246,12 @@
           <label><input type="checkbox" data-action="grid">Retícula 4 × 4 × 4</label>
           <button type="button" data-action="reset">Encajar</button><button type="button" data-action="top">Planta</button><button type="button" data-action="front">Frontal</button>
         </div>
-        <div class="node-inspector-stage"><canvas tabindex="0" aria-label="Vista 3D del nodo. Arrastra para girar; rueda o pellizco para acercar. Flechas para girar, más y menos para zoom."></canvas></div>
+        <div class="node-inspector-main">
+          <div class="node-inspector-stage"><canvas tabindex="0" aria-label="Vista 3D del nodo. Arrastra para girar; rueda o pellizco para acercar. Flechas para girar, más y menos para zoom."></canvas></div>
+          <aside class="node-inspector-lod-panel" aria-label="Diagnóstico de nivel de detalle">
+            <h3>Diagnóstico LOD</h3><div class="node-inspector-lod">Calculando…</div>
+          </aside>
+        </div>
         <p class="node-inspector-help">Arrastra para girar · rueda o pellizco para zoom · flechas para girar · +/− para zoom<br>Proyección ortográfica · caja del nodo en gris · punto seleccionado en amarillo · XYZ a la misma escala, sin exageración del terreno</p>`;
       document.body.appendChild(dialog);
       dialog.addEventListener("cancel", (event) => { event.preventDefault(); this.close(); });
@@ -161,6 +268,14 @@
         select.value = selection.source === "full" && !select.options[1].disabled ? "full" : "sample";
         if (select.options[0].disabled) select.value = "full";
         select.disabled = false;
+        try {
+          renderLodDiagnostics(dialog.querySelector(".node-inspector-lod"),
+            this.getLodDiagnostics?.(record, selection), selection);
+        } catch (error) {
+          dialog.querySelector(".node-inspector-lod").textContent =
+            `No se pudo calcular el diagnóstico LOD: ${error.message}`;
+          console.error("Node inspector LOD diagnostics", error);
+        }
         this.view = new NodeView(dialog.querySelector("canvas"), () => this.showError(new Error("Se ha perdido el contexto 3D. Cierra el inspector y vuelve a abrir el nodo.")));
         const display = () => {
           const points = select.value === "full" ? record.fullPoints : record.points;
@@ -322,7 +437,7 @@
       this.gl.getExtension("WEBGL_lose_context")?.loseContext();
     }
   }
-  const api = { Controller, pickPoint, createGeometry };
+  const api = { Controller, pickPoint, createGeometry, createLodDiagnosticGroups };
   scope.PointScapeNodeInspector = api;
   if (typeof module !== "undefined") module.exports = api;
 })(globalThis);

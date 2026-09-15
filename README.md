@@ -89,6 +89,11 @@ uniform XYZ scale, orthographic projection, and uniform point coloring. The
 selected point is highlighted yellow. Close or Escape returns to the map.
 This is a visual inspection tool, not an automatic statistical homogeneity test.
 
+The side panel captures the node's current LOD decision and its inputs: frustum
+and stabilized visibility, projected rectangle/area/diagonal, physical and
+projected-equivalent angles, FOV and focal length, angular/pixel thresholds,
+hysteresis, point costs, used/remaining global budget, hierarchy, and camera pose.
+
 Only one stored node is fetched; closing releases its data and WebGL resources.
 
 ```text
@@ -169,10 +174,12 @@ All institutional and commercial marks belong to their respective owners. This r
 File loading uses an external-memory index builder. The worker chooses a 64-256 MiB
 working tier from the browser's available device signals, reads 4-16 MiB slices,
 keeps one node's sample in memory, and writes pending partitions to a temporary
-IndexedDB database in bounded batches. Each completed node is saved before the
-worker continues. Leaves contain at most 50,000-200,000 full-resolution points
-according to that tier, including dense or coincident data. All valid source
-points remain in leaf storage.
+IndexedDB database in bounded batches. It builds breadth-first, flushes the root
+immediately for progressive display, and groups later nodes into 4-16 MiB output
+batches. Only one batch can be writing while one bounded batch is prepared, so a
+slow store cannot create an unbounded queue. Leaves contain at most
+50,000-200,000 full-resolution points according to that tier, including dense or
+coincident data. All valid source points remain in leaf storage.
 
 LOD uses a default 1,500,000-point drawing budget, changed immediately by **Max
 points on screen**. A common projected screen-size metric determines refinement

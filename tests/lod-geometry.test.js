@@ -113,3 +113,34 @@ test("expansion and budget priority use the same projected screen metric", () =>
   assert.equal(system.getVisualPriority(tile, map), 500);
   assert.equal(system.shouldExpandTile(tile, map, map.getCenter()), true);
 });
+
+test("node diagnostics report the same screen metric and threshold used by selection", () => {
+  const system = new globalThis.PointScapeLodSystem({
+    config: { fullResolutionAngularDiagonalDegrees:15, tileCollapseHysteresisRatio:0.1,
+      visibilityEnterMargin:1.05, visibilityExitMargin:1.18,
+      visibilityMinimumResidenceMs:220, residentPointBudget:1500000 },
+    tileSelection: selection,
+    lngLatToWebMercatorMeters: (lng, lat) => ({ x:lng, y:lat }),
+    getScreenBounds: (_tile, margin) => ({ visible:true, area:120000,
+      widthPixels:400, heightPixels:300, diagonalPixels:500, margin,
+      intersectsEyePlane:false, ndcBounds:{ minX:-0.4, maxX:0.4, minY:-0.3, maxY:0.3 } }),
+    now: () => 1000,
+  });
+  const map = { getCenter:() => ({ lng:0, lat:0 }),
+    getContainer:() => ({ clientWidth:1200, clientHeight:1000 }),
+    getZoom:() => 14, getPitch:() => 30, getBearing:() => 5,
+    transform:{ fov:36.87 * Math.PI / 180 } };
+  const tile = { id:"r", parentId:null, childIds:[], depth:0,
+    bounds:{ minX:-50, maxX:50, minY:-50, maxY:50, minZ:0, maxZ:10 },
+    sampledPointCount:25000, fullPointCount:50000 };
+  system.getTileDistanceMeters = () => 500;
+  system.getApproxCameraMetricPosition = () => ({ x:0, y:0, z:500 });
+  system.activeTileIds.add(tile.id);
+  const diagnostics = system.getTileLodDiagnostics(tile, map);
+  assert.equal(diagnostics.projection.diagonalPixels, 500);
+  assert.equal(diagnostics.decision.active, true);
+  assert.equal(diagnostics.decision.passesRefinementThreshold, true);
+  assert.equal(diagnostics.budget.pointBudget, 1500000);
+  assert.ok(diagnostics.projection.projectedEquivalentAngleDegrees > 0);
+  assert.ok(diagnostics.threshold.configuredPixels > 0);
+});

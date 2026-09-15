@@ -25,7 +25,10 @@ classes together during startup.
   The inspector fetches one IndexedDB record, freezes that view independently
   of map LOD, and builds local metric coordinates and full-node bounds. It never
   loads descendant subtrees. An optional equal-cell grid assists visual density
-  inspection. GPU buffers/context and the node record are released on close;
+  inspection. A diagnostics snapshot comes directly from `PointScapeLodSystem`
+  and exposes the same projected metric, thresholds, visibility state, hierarchy,
+  camera values, and global budget accounting used by selection. GPU
+  buffers/context and the node record are released on close;
   generation checks discard responses after close or a new LAS load.
 
 - `index.html`: DOM shell and script loading order.
@@ -71,10 +74,14 @@ memory tier; dense leaves use ordinal subdivision after spatial subdivision reac
 its configured limit. Child staging buffers are released before the next node.
 Node metadata is capped at 20,000 entries.
 
-The worker transfers one completed tile and waits for `tiles-saved` from the main
-thread after its IndexedDB transaction commits. No unsaved tile queue grows while
-storage is slow. The final result contains metadata only. The legacy ArrayBuffer
-parser remains available for compatibility but is not the UI file-loading path.
+Nodes are constructed breadth-first so root and coarse coverage become available
+before deep detail. The worker groups completed tiles into device-tier batches
+limited by both bytes (4-16 MiB) and record count. At most one batch is committing
+to IndexedDB while one bounded batch is assembled; `tiles-saved` acknowledgements
+carry a batch ID and apply backpressure before another write starts. The root is
+flushed immediately and progressive preview is enabled by default. The final result
+contains metadata only. The legacy ArrayBuffer parser remains available for
+compatibility but is not the UI file-loading path.
 
 LOD allocates a 1,500,000-point default display budget across all visible roots.
 Refinement eligibility and budget priority use the same projected box-diagonal

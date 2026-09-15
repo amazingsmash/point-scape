@@ -115,7 +115,8 @@
         enqueue(child);
       }
     }
-    return { activeTiles: [...active.values()], nextExpandedTileIds, nextFullTileIds, nextFullPointCounts };
+    return { activeTiles: [...active.values()], nextExpandedTileIds, nextFullTileIds,
+      nextFullPointCounts, usedPointBudget: used, remainingPointBudget: Math.max(0, pointBudget - used) };
   }
 
   function isTileCompletelyBehindCamera(tile, camera) {

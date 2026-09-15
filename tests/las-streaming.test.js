@@ -82,15 +82,19 @@ for (const indexingMode of ["quadtree", "m3no"]) {
     let altitudeSum = 0;
     let pendingWrites = 0;
     let maxPendingWrites = 0;
+    let writeCallbacks = 0;
+    const savedDepths = [];
     const sampledAltitudes = new Set();
     const result = await builder.parseFile(file, {
       indexingMode, scratchStore,
       runtimeCapabilities: { mobileApple: true },
       onTiles: async (records) => {
+        writeCallbacks += 1;
         pendingWrites += 1;
         maxPendingWrites = Math.max(maxPendingWrites, pendingWrites);
         await new Promise((resolve) => setTimeout(resolve, 1));
         for (const record of records) {
+          savedDepths.push(record.depth);
           assert.ok(record.fullPoints.pointCount <= 50000);
           savedPoints += record.fullPoints.pointCount;
           for (let index = 2; index < record.fullPoints.lngLatAlt.length; index += 3) altitudeSum += record.fullPoints.lngLatAlt[index];
@@ -112,10 +116,16 @@ for (const indexingMode of ["quadtree", "m3no"]) {
     assert.equal(result.validPointCount, count);
     assert.ok(Math.abs(altitudeSum - (count * (count - 1) / 2) * 0.000001) < 0.001);
     assert.equal(maxPendingWrites, 1);
+    assert.ok(writeCallbacks < result.tiles.length, "tile records should share bounded IndexedDB batches");
+    assert.equal(savedDepths[0], 0);
+    assert.deepEqual(savedDepths, [...savedDepths].sort((left, right) => left - right),
+      "coarse levels should be persisted before deeper detail");
     assert.ok(file.maxRead <= 4 * 1024 * 1024);
     assert.ok(result.memoryProfile.peakBufferedBytes <= result.memoryProfile.workingSetBytes);
     assert.equal(result.memoryProfile.memoryTier, "compact");
     assert.equal(result.memoryProfile.singlePassNodes, true);
+    assert.equal(result.memoryProfile.maxInFlightTileBatches, 1);
+    assert.equal(result.memoryProfile.traversal, "breadth-first");
     assert.ok(scratchStore.getManyCalls > 0);
     assert.ok(scratchStore.putManyCalls > 0);
     assert.ok(scratchStore.removeManyCalls > 0);

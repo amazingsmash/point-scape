@@ -55,7 +55,9 @@
             tileCallbackQueue = tileCallbackQueue.then(async () => {
               if (message.needsAck && !onTiles) throw new Error("No persistent LAS tile sink is available.");
               await onTiles?.(message.tileRecords || [], message.details || {});
-              if (message.needsAck && !isSettled) worker.postMessage({ type: "tiles-saved" });
+              if (message.needsAck && !isSettled) {
+                worker.postMessage({ type: "tiles-saved", batchId: message.batchId });
+              }
             });
             tileCallbackQueue.catch((error) => {
               fail(error instanceof Error ? error : new Error(String(error)));

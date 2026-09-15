@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { pickPoint, createGeometry } = require("../node-inspector.js");
+const { pickPoint, createGeometry, createLodDiagnosticGroups } = require("../node-inspector.js");
 const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const tile = (id, x, y, z, anchor = [0, 0, 0]) => ({ id, renderKey: `${id}:sample:1`,
   pointCount: 1, anchorMercator: anchor, pickPositions: new Float32Array([x, y, z, 0]) });
@@ -35,4 +35,32 @@ test("inspector preserves the full node extent and original metric proportions",
     assert.ok(Math.abs(geometry.grid[i + 2]) <= 10);
   }
   assert.deepEqual(geometry.toLocal({ lng: 150, lat: 400, altitudeMeters: 20 }), [0, 0, 0]);
+});
+
+test("LOD diagnostic rows expose the final decision, projection, thresholds and budget", () => {
+  const groups = createLodDiagnosticGroups({
+    decision: { active:true, expanded:false, fullResolution:false,
+      passesRefinementThreshold:true, reason:"Admitido" },
+    visibility: { rawVisible:true, stableVisible:true, appliedMargin:1.05,
+      enterMargin:1.05, exitMargin:1.18, residenceRemainingMs:0 },
+    projection: { viewportWidthPixels:1200, viewportHeightPixels:800,
+      widthPixels:300, heightPixels:200, area:60000, diagonalPixels:360.555,
+      projectedEquivalentAngleDegrees:17, verticalFovDegrees:36.87,
+      focalLengthPixels:1200, intersectsEyePlane:false,
+      ndcBounds:{ minX:-0.2, maxX:0.3, minY:-0.1, maxY:0.4 } },
+    geometry: { diagonalMeters:100, distanceMeters:500, geometricAngleDegrees:11.42,
+      cameraPosition:{ x:1, y:2, z:3 } },
+    threshold: { configuredDegrees:15, configuredPixels:316, stablePixels:316,
+      collapseHysteresisRatio:0.1 },
+    budget: { pointBudget:1500000, samplePointCost:25000, fullPointCost:50000,
+      admittedFullPointCount:0 },
+    hierarchy: { depth:3, parentId:"r.0", childCount:4 },
+    camera: { zoom:15, pitchDegrees:45, bearingDegrees:10 },
+  }, { source:"sample" });
+  assert.deepEqual(groups.map((group) => group.title),
+    ["Decisión", "Proyección y visibilidad", "Ángulos y umbrales", "Presupuesto y jerarquía", "Cámara"]);
+  assert.ok(groups.flatMap((group) => group.rows).some(([label, value]) =>
+    label === "Diagonal proyectada / prioridad" && value.includes("360,56")));
+  assert.ok(groups.flatMap((group) => group.rows).some(([label, value]) =>
+    label === "Presupuesto total en pantalla" && value.includes("1.500.000")));
 });

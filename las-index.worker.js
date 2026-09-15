@@ -2,12 +2,15 @@ importScripts("./pointscape-octree-builder.js");
 importScripts("./las-scratch-store.js");
 
 let acknowledgeTiles = null;
+let nextTileBatchId = 1;
 self.onmessage = async (event) => {
-  const { type, buffer, file, options = {}, config = {} } = event.data || {};
+  const { type, buffer, file, options = {}, config = {}, batchId } = event.data || {};
 
   if (type === "tiles-saved") {
-    acknowledgeTiles?.();
-    acknowledgeTiles = null;
+    if (acknowledgeTiles?.batchId === batchId) {
+      acknowledgeTiles.resolve();
+      acknowledgeTiles = null;
+    }
     return;
   }
 
@@ -24,8 +27,9 @@ self.onmessage = async (event) => {
         onMetadata: (metadata) => self.postMessage({ type: "metadata", metadata }),
         onProgress: (processed, total, details) => self.postMessage({ type: "progress", processed, total, details }),
         onTiles: (tileRecords, details) => new Promise((resolve) => {
-          acknowledgeTiles = resolve;
-          self.postMessage({ type: "tiles", tileRecords, details, needsAck: true },
+          const batchId = nextTileBatchId++;
+          acknowledgeTiles = { batchId, resolve };
+          self.postMessage({ type: "tiles", tileRecords, details, needsAck: true, batchId },
             octreeBuilder.collectTileRecordTransferList(tileRecords));
         }),
       });

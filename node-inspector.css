@@ -64,8 +64,55 @@
 .node-inspector-tools label { display: flex; align-items: center; gap: 8px; }
 .node-inspector-tools input { width: 90px; }
 .node-inspector-tools input[type="checkbox"] { width: 18px; height: 18px; }
-.node-inspector-stage { flex: 1; min-height: 0; position: relative; background: #000; }
+.node-inspector-main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+}
+.node-inspector-stage { min-height: 0; position: relative; background: #000; }
 .node-inspector-stage canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.node-inspector-lod-panel {
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px 18px;
+  border-left: 1px solid #26364b;
+  background: #0d141e;
+}
+.node-inspector-lod-panel h3 { margin: 0 0 10px; font-size: 16px; }
+.node-inspector-lod-state {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid #536277;
+  border-radius: 7px;
+  background: #172232;
+  color: #dbe8f8;
+}
+.node-inspector-lod-state.is-active { border-color: #39785d; background: #11271d; color: #bfeacf; }
+.node-inspector-lod-state.is-inactive { border-color: #8c6540; background: #2a1d12; color: #f1d3af; }
+.node-inspector-lod section + section { margin-top: 15px; }
+.node-inspector-lod h4 {
+  margin: 0 0 6px;
+  color: #94cfff;
+  font-size: 12px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.node-inspector-lod dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.node-inspector-lod dt { min-width: 0; color: #94a6bb; }
+.node-inspector-lod dd {
+  max-width: 190px;
+  margin: 0;
+  color: #edf4fd;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .node-inspector-dialog :focus-visible, .node-inspector-menu :focus-visible { outline: 2px solid #80c9ff; outline-offset: -2px; }
 .node-inspector-help { margin: 0; padding: 8px 16px; color: #aebbd0; font-size: 12px; background: #101722; }
 @media (max-width: 600px) {
@@ -74,4 +121,8 @@
   .node-inspector-tools { gap: 6px; padding: 6px 8px; }
   .node-inspector-tools select { max-width: 210px; }
   .node-inspector-info { font-size: 12px; }
+}
+@media (max-width: 850px) {
+  .node-inspector-main { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) minmax(160px, 34vh); }
+  .node-inspector-lod-panel { border-left: 0; border-top: 1px solid #26364b; }
 }
