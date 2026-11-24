@@ -39,9 +39,15 @@ const pointCloudConfig = {
   visibilityExitMargin: 1.18,
   visibilityMinimumResidenceMs: 220,
   lodTransitionHoldMs: 220,
+  voxelImpostors: true,
+  voxelMaxPixels: 5,
   pointRadiusCentimeters: 8,
   pointMinimumRadiusPixels: 0.75,
   pointMaximumRadiusPixels: 24,
+  edlEnabled: true,
+  edlStrength: 1,
+  edlRadiusPixels: 2,
+  edlNeighborCount: 8,
   parseYieldEveryPoints: 5000,
   progressiveLoadingPreview: true,
   progressiveTilePointInterval: 100000,
@@ -49,6 +55,7 @@ const pointCloudConfig = {
   indexedDbWriteBatchSize: 24,
   residentPointBudget: 1500000,
   flyToClearanceMeters: 1000,
+  explodedPointFraction: 0.1,
 };
 
 const volatileTileDbConfig = {
@@ -81,6 +88,8 @@ const lasClassColors = new Map(
 );
 
 const splashScreen = document.querySelector("#app-splash");
+const splashLogo = document.querySelector(".splash-logo-card img");
+const institutionalLogo = document.querySelector(".institutional-logo");
 const status = document.querySelector("#map-status");
 const menuToggle = document.querySelector("#menu-toggle");
 const menuContent = document.querySelector("#menu-content");
@@ -117,6 +126,13 @@ const tileMinDiagonalControl = document.querySelector("#tile-min-diagonal-contro
 const tileMaxDepthControl = document.querySelector("#tile-max-depth-control");
 const depthBiasControl = document.querySelector("#depth-bias-control");
 const depthBiasValue = document.querySelector("#depth-bias-value");
+const edlToggle = document.querySelector("#edl-toggle");
+const edlStrengthControl = document.querySelector("#edl-strength-control");
+const edlStrengthValue = document.querySelector("#edl-strength-value");
+const edlRadiusControl = document.querySelector("#edl-radius-control");
+const edlRadiusValue = document.querySelector("#edl-radius-value");
+const edlNeighborsControl = document.querySelector("#edl-neighbors-control");
+const edlNeighborsValue = document.querySelector("#edl-neighbors-value");
 const classificationLegend = document.querySelector("#classification-legend");
 const randomizeClassificationColorsButton = document.querySelector(
   "#randomize-classification-colors",
@@ -125,7 +141,28 @@ const pointCloudStats = document.querySelector("#point-cloud-stats");
 const lasFileInput = document.querySelector("#las-file");
 const lasDrop = document.querySelector("#las-drop");
 const lasStatus = document.querySelector("#las-status");
+const copcDemoButton = document.querySelector("#copc-demo");
+const parisDemoButton = document.querySelector("#paris-demo");
+const voxelImpostorToggle = document.querySelector("#voxel-impostor-toggle");
+const voxelPixelControl = document.querySelector("#voxel-pixel-control");
+const voxelPixelValue = document.querySelector("#voxel-pixel-value");
+const copcDemos = new Map([
+  ["copc", { name: "Autzen Stadium", url: "https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz" }],
+  ["paris", {
+    name: "Paris · Eiffel Tower",
+    url: "https://data.geopf.fr/telechargement/download/LiDARHD-NUALID/NUALHD_1-0__LAZ_LAMB93_KE_2025-06-06/LHD_FXX_0648_6863_PTS_LAMB93_IGN69.copc.laz",
+  }],
+  ["millsite", { name: "Millsite Reservoir", url: "https://s3.amazonaws.com/hobu-lidar/millsite.copc.laz" }],
+]);
+const copcOptions = new URLSearchParams(window.location.search);
+const requestedCopcWorkers = Number(copcOptions.get("copcWorkers"));
+const copcWorkerCount = [1, 2, 4].includes(requestedCopcWorkers) ? requestedCopcWorkers :
+  (navigator.hardwareConcurrency >= 4 ? 2 : 1);
+const progressiveCopcHierarchy = copcOptions.get("copcHierarchy") !== "eager";
 const flyToPointCloudButton = document.querySelector("#fly-to-point-cloud");
+const explodedViewButton = document.querySelector("#exploded-view");
+const explodedDecimationControl = document.querySelector("#exploded-decimation-control");
+const explodedDecimationValue = document.querySelector("#exploded-decimation-value");
 
 let currentPointCloudPoints = [];
 let currentPointCloudFlyToPoints = [];
@@ -140,12 +177,22 @@ let pointCloudTileRefreshId = 0;
 let currentPointCloudStats = null;
 let pointCloudLodRefreshQueued = false;
 let pointCloudFinalFrameRefreshPending = false;
+let explodedViewLayout = { maxDepth: 0, levelSpacingMeters: 0 };
+let explodedViewProgress = 0;
+let explodedViewActive = false;
+let explodedViewAnimation = 0;
+let currentTileById = new Map();
 
 const pointscapeTileStore = new PointScapeDataIngestion.VolatileTileStore({
   ...volatileTileDbConfig,
   getBatchSize: () => pointCloudConfig.indexedDbWriteBatchSize,
   yieldToBrowser: () => yieldToBrowser(),
 });
+const copcTileSources = new Map();
+const pendingCopcPages = new Map();
+const failedCopcPages = new Set();
+let copcDecodePool = null;
+let copcPerformance = null;
 const pointscapeLasIngestion = new PointScapeDataIngestion.LasDataIngestionService({
   getConfig: () => ({
     tileSamplePoints: pointCloudConfig.tileSamplePoints,
@@ -212,11 +259,26 @@ const pointscapeUiController = new PointScapeUiController({
     tileMaxDepthControl,
     depthBiasControl,
     depthBiasValue,
+    edlToggle,
+    edlStrengthControl,
+    edlStrengthValue,
+    edlRadiusControl,
+    edlRadiusValue,
+    edlNeighborsControl,
+    edlNeighborsValue,
     randomizeClassificationColorsButton,
     lasFileInput,
     lasDrop,
     lasStatus,
+    copcDemoButton,
+    parisDemoButton,
+    voxelImpostorToggle,
+    voxelPixelControl,
+    voxelPixelValue,
     flyToPointCloudButton,
+    explodedViewButton,
+    explodedDecimationControl,
+    explodedDecimationValue,
   },
   actions: {
     config: pointCloudConfig,
@@ -233,6 +295,7 @@ const pointscapeUiController = new PointScapeUiController({
     updateDetailBoxesLayer,
     getPointCloudOffsetMeters,
     syncPointSizingControlsFromConfig,
+    syncEdlControlsFromConfig,
     setBlockBoundsVisible,
     setBlockDetailsVisible,
     randomizeLasClassColors,
@@ -240,11 +303,41 @@ const pointscapeUiController = new PointScapeUiController({
     readNumericControl,
     updateLodControlLabels,
     getDepthBias,
-    getLasFiles,
-    loadLasFiles,
+    getPointCloudFiles,
+    loadPointCloudFiles,
+    loadCopcDemo,
+    toggleExplodedView,
+    restartExplodedViewLoading,
     flyToCurrentPointCloud,
   },
 });
+
+function revealLogoWhenLoaded(logo, canReveal = () => true) {
+  if (!logo) {
+    return () => {};
+  }
+
+  const reveal = () => {
+    if (canReveal() && logo.complete && logo.naturalWidth > 0) {
+      logo.classList.add("is-visible");
+    }
+  };
+
+  if (logo.complete) {
+    window.requestAnimationFrame(() => window.requestAnimationFrame(reveal));
+  } else {
+    logo.addEventListener("load", reveal, { once: true });
+  }
+
+  return reveal;
+}
+
+let mapLogoCanAppear = !splashScreen;
+revealLogoWhenLoaded(splashLogo);
+const revealInstitutionalLogo = revealLogoWhenLoaded(
+  institutionalLogo,
+  () => mapLogoCanAppear,
+);
 
 function scheduleSplashDismiss() {
   if (!splashScreen) {
@@ -258,6 +351,8 @@ function scheduleSplashDismiss() {
     splashScreen.classList.add("is-hiding");
     window.setTimeout(() => {
       splashScreen.hidden = true;
+      mapLogoCanAppear = true;
+      revealInstitutionalLogo();
     }, fadeMs);
   }, displayMs);
 }
@@ -378,9 +473,25 @@ function initMap() {
     syncInitialLayerState();
     status.classList.add("is-hidden");
     window.mapLibreMap.resize();
+    copcDemoButton.disabled = false;
+    parisDemoButton.disabled = false;
+    const demo = new URLSearchParams(window.location.search).get("demo");
+    if (copcDemos.has(demo)) loadCopcDemo(demo);
+  });
+
+  window.mapLibreMap.on("movestart", () => {
+    if (!copcPerformance) return;
+    copcPerformance.moveEndedAt = null;
+    copcPerformance.detailMs = null;
+    renderPointCloudStats();
   });
 
   window.mapLibreMap.on("moveend", () => {
+    failedCopcPages.clear();
+    if (copcPerformance) {
+      copcPerformance.moveEndedAt = performance.now();
+      copcPerformance.detailMs = null;
+    }
     refreshTileBounds();
     pointCloudFinalFrameRefreshPending = true;
     window.mapLibreMap.triggerRepaint();
@@ -551,6 +662,17 @@ function createWebGlPointCloudLayer() {
 
       this.program = createProgram(gl, shaders.vertex, shaders.fragment);
       this.positionLocation = gl.getAttribLocation(this.program, "a_position");
+      this.voxelCornerLocation = gl.getAttribLocation(this.program, "a_voxel_corner");
+      this.voxelEnabledLocation = gl.getUniformLocation(this.program, "u_voxel");
+      this.voxelExtentLocation = gl.getUniformLocation(this.program, "u_voxel_extent");
+      if (isWebGl2) {
+        const mesh = PointScapeVoxelImpostors.createCubeMesh();
+        this.voxelVertexCount = mesh.length / 4;
+        this.voxelMesh = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.voxelMesh);
+        gl.bufferData(gl.ARRAY_BUFFER, mesh, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      }
       this.classificationLocation = gl.getAttribLocation(
         this.program,
         "a_classification",
@@ -565,6 +687,7 @@ function createWebGlPointCloudLayer() {
         "u_projection_pixels_per_mercator",
       );
       this.metersToMercatorLocation = gl.getUniformLocation(this.program, "u_meters_to_mercator");
+      this.explodedOffsetLocation = gl.getUniformLocation(this.program, "u_exploded_offset");
       this.depthBiasLocation = gl.getUniformLocation(this.program, "u_depth_bias");
       this.classCountLocation = gl.getUniformLocation(this.program, "u_class_count");
       this.classCodesLocation = gl.getUniformLocation(
@@ -579,6 +702,13 @@ function createWebGlPointCloudLayer() {
         this.program,
         "u_fallback_color",
       );
+      this.edlDepthPassLocation = gl.getUniformLocation(this.program, "u_edl_depth_pass");
+      this.edlEnabledLocation = gl.getUniformLocation(this.program, "u_edl_enabled");
+      this.edlDepthMapLocation = gl.getUniformLocation(this.program, "u_edl_depth_map");
+      this.edlTextureSizeLocation = gl.getUniformLocation(this.program, "u_edl_texture_size");
+      this.edlRadiusLocation = gl.getUniformLocation(this.program, "u_edl_radius_px");
+      this.edlStrengthLocation = gl.getUniformLocation(this.program, "u_edl_strength");
+      this.edlNeighborsLocation = gl.getUniformLocation(this.program, "u_edl_neighbors");
     },
 
     updateElevationBuffer(map) {
@@ -718,6 +848,8 @@ function createWebGlPointCloudLayer() {
         ),
       );
       gl.uniform1f(this.depthBiasLocation, getDepthBias());
+      gl.uniform1i(this.edlDepthPassLocation, 0);
+      gl.uniform1i(this.edlEnabledLocation, 0);
       setPointCloudClassColorUniforms(gl, this);
 
       gl.enableVertexAttribArray(this.positionLocation);
@@ -725,6 +857,8 @@ function createWebGlPointCloudLayer() {
 
       const wasDepthTestEnabled = gl.isEnabled(gl.DEPTH_TEST);
       const wasBlendEnabled = gl.isEnabled(gl.BLEND);
+      const wasCullEnabled = gl.isEnabled(gl.CULL_FACE);
+      if (this.tileBuffers.some(tile => tile.voxelSizeMeters)) gl.disable(gl.CULL_FACE);
       const previousDepthFunction = gl.getParameter(gl.DEPTH_FUNC);
       const previousDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
       const previousColorMask = gl.getParameter(gl.COLOR_WRITEMASK);
@@ -737,11 +871,30 @@ function createWebGlPointCloudLayer() {
         gl.BLEND_EQUATION_ALPHA,
       );
 
+      let edlTextureBinding;
+      let previousActiveTexture;
+      const edlActive = pointCloudConfig.edlEnabled && this.pointCount > 0 &&
+        ensureEdlDepthTarget(this, gl);
+      if (edlActive) {
+        renderEdlDepthMap(this, gl, matrix);
+        previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+        gl.activeTexture(gl.TEXTURE0);
+        edlTextureBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+        gl.bindTexture(gl.TEXTURE_2D, this.edlTarget.texture);
+        gl.uniform1i(this.edlDepthMapLocation, 0);
+        gl.uniform2f(this.edlTextureSizeLocation, gl.drawingBufferWidth, gl.drawingBufferHeight);
+        gl.uniform1f(this.edlRadiusLocation, pointCloudConfig.edlRadiusPixels * pixelRatio);
+        gl.uniform1f(this.edlStrengthLocation, pointCloudConfig.edlStrength);
+        gl.uniform1i(this.edlNeighborsLocation, pointCloudConfig.edlNeighborCount);
+        gl.uniform1i(this.edlEnabledLocation, 1);
+      }
+
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
       gl.depthMask(true);
       gl.colorMask(false, false, false, false);
       gl.disable(gl.BLEND);
+      gl.uniform1i(this.edlEnabledLocation, 0);
       drawPointCloudTileBuffers(this, gl, matrix);
 
       gl.colorMask(true, true, true, true);
@@ -755,7 +908,13 @@ function createWebGlPointCloudLayer() {
         gl.ONE,
         gl.ONE_MINUS_SRC_ALPHA,
       );
+      gl.uniform1i(this.edlEnabledLocation, edlActive ? 1 : 0);
       drawPointCloudTileBuffers(this, gl, matrix);
+
+      if (edlActive) {
+        gl.bindTexture(gl.TEXTURE_2D, edlTextureBinding);
+        gl.activeTexture(previousActiveTexture);
+      }
 
       gl.depthFunc(previousDepthFunction);
       gl.depthMask(previousDepthMask);
@@ -776,20 +935,111 @@ function createWebGlPointCloudLayer() {
       if (!wasBlendEnabled) {
         gl.disable(gl.BLEND);
       }
+      if (wasCullEnabled) gl.enable(gl.CULL_FACE);
       gl.disableVertexAttribArray(this.positionLocation);
       gl.disableVertexAttribArray(this.classificationLocation);
       gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      if (this.pointCount && copcPerformance?.firstFrameMs === null) {
+        copcPerformance.firstFrameMs = performance.now() - copcPerformance.startedAt;
+        renderPointCloudStats();
+      }
     },
 
     onRemove(map, gl) {
+      deleteEdlDepthTarget(gl, this.edlTarget);
+      this.edlTarget = null;
       deletePointCloudTileBuffers(gl, this.tileBuffers);
       this.tileBuffers = [];
       this.tileBuffersById.clear();
+      if (this.voxelMesh) gl.deleteBuffer(this.voxelMesh);
       if (this.program) {
         gl.deleteProgram(this.program);
       }
     },
   };
+}
+
+function deleteEdlDepthTarget(gl, target) {
+  if (!target) return;
+  gl.deleteFramebuffer(target.framebuffer);
+  gl.deleteRenderbuffer(target.depth);
+  gl.deleteTexture(target.texture);
+}
+
+function ensureEdlDepthTarget(layer, gl) {
+  const width = gl.drawingBufferWidth;
+  const height = gl.drawingBufferHeight;
+  if (!width || !height) return false;
+  if (layer.edlTarget?.width === width && layer.edlTarget?.height === height) {
+    return true;
+  }
+  deleteEdlDepthTarget(gl, layer.edlTarget);
+  layer.edlTarget = null;
+
+  const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  const previousRenderbuffer = gl.getParameter(gl.RENDERBUFFER_BINDING);
+  const previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  const target = {
+    width, height,
+    framebuffer: gl.createFramebuffer(),
+    texture: gl.createTexture(),
+    depth: gl.createRenderbuffer(),
+  };
+  gl.bindTexture(gl.TEXTURE_2D, target.texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0,
+    gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, target.depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D, target.texture, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT,
+    gl.RENDERBUFFER, target.depth);
+  const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, previousRenderbuffer);
+  gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+  if (!complete) {
+    deleteEdlDepthTarget(gl, target);
+    return false;
+  }
+  layer.edlTarget = target;
+  return true;
+}
+
+function renderEdlDepthMap(layer, gl, matrix) {
+  const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  const previousViewport = gl.getParameter(gl.VIEWPORT);
+  const previousClearColor = gl.getParameter(gl.COLOR_CLEAR_VALUE);
+  const previousClearDepth = gl.getParameter(gl.DEPTH_CLEAR_VALUE);
+  const scissorEnabled = gl.isEnabled(gl.SCISSOR_TEST);
+  const stencilEnabled = gl.isEnabled(gl.STENCIL_TEST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.edlTarget.framebuffer);
+  gl.viewport(0, 0, layer.edlTarget.width, layer.edlTarget.height);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.STENCIL_TEST);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.depthMask(true);
+  gl.colorMask(true, true, true, true);
+  gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clearDepth(1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.uniform1i(layer.edlDepthPassLocation, 1);
+  gl.uniform1i(layer.edlEnabledLocation, 0);
+  drawPointCloudTileBuffers(layer, gl, matrix);
+  gl.uniform1i(layer.edlDepthPassLocation, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
+  gl.viewport(...previousViewport);
+  gl.clearColor(...previousClearColor);
+  gl.clearDepth(previousClearDepth);
+  if (scissorEnabled) gl.enable(gl.SCISSOR_TEST);
+  if (stencilEnabled) gl.enable(gl.STENCIL_TEST);
 }
 
 function createWebGlDetailBoxesLayer() {
@@ -811,10 +1061,13 @@ function createWebGlDetailBoxesLayer() {
           precision highp float;
           uniform mat4 u_matrix;
           uniform vec4 u_anchor_clip;
+          uniform float u_exploded_progress;
           attribute vec3 a_position;
+          attribute float a_exploded_offset;
 
           void main() {
-            gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
+            gl_Position = u_anchor_clip + u_matrix *
+              vec4(a_position.xy, a_position.z + a_exploded_offset * u_exploded_progress, 0.0);
           }
         `,
         `
@@ -830,6 +1083,8 @@ function createWebGlDetailBoxesLayer() {
       this.matrixLocation = gl.getUniformLocation(this.program, "u_matrix");
       this.anchorClipLocation = gl.getUniformLocation(this.program, "u_anchor_clip");
       this.colorLocation = gl.getUniformLocation(this.program, "u_color");
+      this.explodedProgressLocation = gl.getUniformLocation(this.program, "u_exploded_progress");
+      this.explodedOffsetLocation = gl.getAttribLocation(this.program, "a_exploded_offset");
     },
 
     setTiles(tiles, map) {
@@ -858,6 +1113,7 @@ function createWebGlDetailBoxesLayer() {
       gl.useProgram(this.program);
       gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
       gl.uniform4f(this.colorLocation, 1, 0.48, 0.05, 0.92);
+      gl.uniform1f(this.explodedProgressLocation, explodedViewProgress);
       gl.uniform4fv(
         this.anchorClipLocation,
         multiplyMatrixAndMercatorPoint(matrix, this.anchorMercator),
@@ -882,11 +1138,14 @@ function createWebGlDetailBoxesLayer() {
       );
       gl.lineWidth(2);
       gl.enableVertexAttribArray(this.positionLocation);
+      gl.enableVertexAttribArray(this.explodedOffsetLocation);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.buffer);
-      gl.vertexAttribPointer(this.positionLocation, 3, gl.FLOAT, false, 0, 0);
+      gl.vertexAttribPointer(this.positionLocation, 3, gl.FLOAT, false, 16, 0);
+      gl.vertexAttribPointer(this.explodedOffsetLocation, 1, gl.FLOAT, false, 16, 12);
       gl.drawArrays(gl.LINES, 0, this.lineVertexCount);
       gl.bindBuffer(gl.ARRAY_BUFFER, null);
       gl.disableVertexAttribArray(this.positionLocation);
+      gl.disableVertexAttribArray(this.explodedOffsetLocation);
 
       if (wasDepthTestEnabled) {
         gl.enable(gl.DEPTH_TEST);
@@ -955,6 +1214,7 @@ function normalizeRenderableTiles(tiles, existingBuffersById = new Map()) {
       return {
         id,
         points,
+        voxelSizeMeters: tile?.voxelSizeMeters ?? (pointCount ? 0 : existingBuffer?.voxelSizeMeters) ?? 0,
         pointCount:
           pointCount || tile?.pointCount || existingBuffer?.pointCount || 0,
         renderKey,
@@ -997,6 +1257,8 @@ function createPointCloudTileBuffer(gl, tile, map, useTerrainElevation) {
     id: tile.id,
     renderKey: tile.renderKey,
     buffer,
+    voxelSizeMeters: tile.voxelSizeMeters,
+    verticalScale: useTerrainElevation ? getTerrainExaggeration() : 1,
     pointCount: pointBuffer.pointCount,
     anchorMercator: pointBuffer.anchorMercator,
     metersToMercator: pointBuffer.metersToMercator,
@@ -1019,9 +1281,14 @@ function deletePointCloudTileBuffer(gl, tileBuffer) {
 function updateDetailBoxBuffer(layer, map) {
   const gl = layer.gl;
   const mercatorPoints = [];
+  const offsets = [];
 
   layer.tiles.forEach((tile) => {
-    mercatorPoints.push(...createDetailBoxMercatorLinePoints(tile));
+    const lines = createDetailBoxMercatorLinePoints(tile);
+    mercatorPoints.push(...lines);
+    const metersToMercator = lines[0]?.meterInMercatorCoordinateUnits?.() || 0;
+    const offset = PointScapeExplodedView.offsetMeters(tile.depth, explodedViewLayout) * metersToMercator;
+    for (let index = 0; index < lines.length; index += 1) offsets.push(offset);
   });
 
   if (layer.buffer) {
@@ -1037,13 +1304,14 @@ function updateDetailBoxBuffer(layer, map) {
   }
 
   layer.anchorMercator = getMercatorPointCloudAnchor(mercatorPoints);
-  const positions = new Float32Array(mercatorPoints.length * 3);
+  const positions = new Float32Array(mercatorPoints.length * 4);
 
   mercatorPoints.forEach((point, index) => {
-    const offset = index * 3;
+    const offset = index * 4;
     positions[offset] = point.x - layer.anchorMercator[0];
     positions[offset + 1] = point.y - layer.anchorMercator[1];
     positions[offset + 2] = point.z - layer.anchorMercator[2];
+    positions[offset + 3] = offsets[index];
   });
 
   layer.buffer = gl.createBuffer();
@@ -1154,6 +1422,13 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
       multiplyMatrixAndMercatorPoint(matrix, tileBuffer.anchorMercator),
     );
     gl.uniform1f(layer.metersToMercatorLocation, tileBuffer.metersToMercator || 0);
+    const metadata = currentTileById.get(tileBuffer.id);
+    tileBuffer.explodedOffsetMercator = metadata
+      ? PointScapeExplodedView.offsetMeters(metadata.depth, explodedViewLayout) *
+        (tileBuffer.metersToMercator || 0) : 0;
+    tileBuffer.explodedProgress = explodedViewProgress;
+    gl.uniform1f(layer.explodedOffsetLocation,
+      tileBuffer.explodedOffsetMercator * explodedViewProgress);
     gl.bindBuffer(gl.ARRAY_BUFFER, tileBuffer.buffer);
     gl.vertexAttribPointer(
       layer.positionLocation,
@@ -1171,7 +1446,23 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
       pointCloudVertexStrideBytes,
       12,
     );
-    gl.drawArrays(gl.POINTS, 0, tileBuffer.pointCount);
+    const voxel = Boolean(tileBuffer.voxelSizeMeters && layer.voxelMesh);
+    gl.uniform1i(layer.voxelEnabledLocation, voxel);
+    if (!voxel) {
+      gl.drawArrays(gl.POINTS, 0, tileBuffer.pointCount);
+      return;
+    }
+    const side = tileBuffer.voxelSizeMeters * tileBuffer.metersToMercator;
+    gl.uniform3f(layer.voxelExtentLocation, side, side, side * tileBuffer.verticalScale);
+    gl.bindBuffer(gl.ARRAY_BUFFER, layer.voxelMesh);
+    gl.enableVertexAttribArray(layer.voxelCornerLocation);
+    gl.vertexAttribPointer(layer.voxelCornerLocation, 4, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(layer.positionLocation, 1);
+    gl.vertexAttribDivisor(layer.classificationLocation, 1);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, layer.voxelVertexCount, tileBuffer.pointCount);
+    gl.vertexAttribDivisor(layer.positionLocation, 0);
+    gl.vertexAttribDivisor(layer.classificationLocation, 0);
+    gl.disableVertexAttribArray(layer.voxelCornerLocation);
   });
 }
 
@@ -1405,14 +1696,19 @@ function createPointCloudShaders(isWebGl2) {
         uniform float u_max_point_radius_px;
         uniform float u_projection_pixels_per_mercator;
         uniform float u_meters_to_mercator;
+        uniform float u_exploded_offset;
         uniform float u_depth_bias;
+        uniform bool u_voxel;
+        uniform vec3 u_voxel_extent;
         uniform int u_class_count;
         uniform float u_class_codes[${maxShaderClassColors}];
         uniform vec4 u_class_colors[${maxShaderClassColors}];
         uniform vec4 u_fallback_color;
         in vec3 a_position;
+        in vec4 a_voxel_corner;
         in float a_classification;
         out vec4 v_color;
+        out float v_edl_depth;
 
         vec4 getClassColor(float classification) {
           vec4 color = u_fallback_color;
@@ -1430,8 +1726,11 @@ function createPointCloudShaders(isWebGl2) {
         }
 
         void main() {
-          gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
+          vec3 position = a_position + vec3(0.0, 0.0, u_exploded_offset);
+          if (u_voxel) position += a_voxel_corner.xyz * u_voxel_extent;
+          gl_Position = u_anchor_clip + u_matrix * vec4(position, 0.0);
           gl_Position.z -= u_depth_bias * gl_Position.w;
+          v_edl_depth = log2(max(abs(gl_Position.w), 0.000001));
           float projected_radius_px =
             u_point_radius_meters * u_meters_to_mercator *
             u_projection_pixels_per_mercator / max(abs(gl_Position.w), 0.0000001);
@@ -1441,22 +1740,10 @@ function createPointCloudShaders(isWebGl2) {
             u_max_point_radius_px
           );
           v_color = getClassColor(a_classification);
+          if (u_voxel) v_color = vec4(v_color.rgb * a_voxel_corner.w, 1.0);
         }
       `,
-      fragment: `#version 300 es
-        precision highp float;
-        in vec4 v_color;
-        out vec4 fragColor;
-
-        void main() {
-          vec2 centered = gl_PointCoord - vec2(0.5);
-          float distanceFromCenter = length(centered);
-          if (distanceFromCenter > 0.5) {
-            discard;
-          }
-          fragColor = v_color;
-        }
-      `,
+      fragment: createEdlPointFragmentShader(true),
     };
   }
 
@@ -1470,6 +1757,7 @@ function createPointCloudShaders(isWebGl2) {
       uniform float u_max_point_radius_px;
       uniform float u_projection_pixels_per_mercator;
       uniform float u_meters_to_mercator;
+      uniform float u_exploded_offset;
       uniform float u_depth_bias;
       uniform int u_class_count;
       uniform float u_class_codes[${maxShaderClassColors}];
@@ -1478,6 +1766,7 @@ function createPointCloudShaders(isWebGl2) {
       attribute vec3 a_position;
       attribute float a_classification;
       varying vec4 v_color;
+      varying float v_edl_depth;
 
       vec4 getClassColor(float classification) {
         vec4 color = u_fallback_color;
@@ -1495,8 +1784,9 @@ function createPointCloudShaders(isWebGl2) {
       }
 
       void main() {
-        gl_Position = u_anchor_clip + u_matrix * vec4(a_position, 0.0);
+        gl_Position = u_anchor_clip + u_matrix * vec4(a_position.xy, a_position.z + u_exploded_offset, 0.0);
         gl_Position.z -= u_depth_bias * gl_Position.w;
+        v_edl_depth = log2(max(abs(gl_Position.w), 0.000001));
         float projected_radius_px =
           u_point_radius_meters * u_meters_to_mercator *
           u_projection_pixels_per_mercator / max(abs(gl_Position.w), 0.0000001);
@@ -1508,20 +1798,63 @@ function createPointCloudShaders(isWebGl2) {
         v_color = getClassColor(a_classification);
       }
     `,
-    fragment: `
-      precision highp float;
-      varying vec4 v_color;
-
-      void main() {
-        vec2 centered = gl_PointCoord - vec2(0.5);
-        float distanceFromCenter = length(centered);
-        if (distanceFromCenter > 0.5) {
-          discard;
-        }
-        gl_FragColor = v_color;
-      }
-    `,
+    fragment: createEdlPointFragmentShader(false),
   };
+}
+
+function createEdlPointFragmentShader(isWebGl2) {
+  return `${isWebGl2 ? "#version 300 es" : ""}
+    precision highp float;
+    ${isWebGl2 ? "in" : "varying"} vec4 v_color;
+    ${isWebGl2 ? "in" : "varying"} float v_edl_depth;
+    uniform bool u_edl_depth_pass;
+    uniform bool u_voxel;
+    uniform bool u_edl_enabled;
+    uniform sampler2D u_edl_depth_map;
+    uniform vec2 u_edl_texture_size;
+    uniform float u_edl_radius_px;
+    uniform float u_edl_strength;
+    uniform int u_edl_neighbors;
+    ${isWebGl2 ? "out vec4 fragColor;" : ""}
+
+    float unpackDepth(vec4 sampleValue) {
+      return (sampleValue.r * 255.0 + sampleValue.g * 65280.0) / 65535.0;
+    }
+
+    void main() {
+      if (!u_voxel && length(gl_PointCoord - vec2(0.5)) > 0.5) discard;
+      vec4 color = v_color;
+      if (u_edl_depth_pass) {
+        // Logarithmic view depth, packed into 16 bits; alpha marks occupied pixels.
+        float depth = clamp((v_edl_depth + 20.0) / 40.0, 0.0, 1.0);
+        float packed = floor(depth * 65535.0 + 0.5);
+        color = vec4(mod(packed, 256.0) / 255.0,
+                     floor(packed / 256.0) / 255.0, 0.0, 1.0);
+      } else if (u_edl_enabled) {
+        vec2 uv = gl_FragCoord.xy / u_edl_texture_size;
+        vec4 center = ${isWebGl2 ? "texture" : "texture2D"}(u_edl_depth_map, uv);
+        if (center.a > 0.5) {
+          float response = 0.0;
+          float centerDepth = unpackDepth(center);
+          for (int i = 0; i < 16; i++) {
+            if (i >= u_edl_neighbors) break;
+            float angle = 6.28318530718 * float(i) / float(u_edl_neighbors);
+            vec2 direction = vec2(cos(angle), sin(angle));
+            vec2 neighborUv = uv + direction * u_edl_radius_px / u_edl_texture_size;
+            if (neighborUv.x < 0.0 || neighborUv.x > 1.0 ||
+                neighborUv.y < 0.0 || neighborUv.y > 1.0) continue;
+            vec4 neighbor = ${isWebGl2 ? "texture" : "texture2D"}(u_edl_depth_map, neighborUv);
+            if (neighbor.a > 0.5) {
+              response += max(0.0, centerDepth - unpackDepth(neighbor));
+            }
+          }
+          response /= float(u_edl_neighbors);
+          color.rgb *= exp(-response * 12000.0 * u_edl_strength);
+        }
+      }
+      ${isWebGl2 ? "fragColor" : "gl_FragColor"} = color;
+    }
+  `;
 }
 
 function createProgram(gl, vertexSource, fragmentSource) {
@@ -1700,6 +2033,17 @@ function updateDetailBoxesLayer() {
     return;
   }
 
+  if (explodedViewActive || explodedViewProgress > 0) {
+    const geometryKey = `${terrainToggle.checked}:${getTerrainExaggeration()}:${getPointCloudOffsetMeters()}`;
+    if (layer.tiles !== currentTileIndex || layer.geometryKey !== geometryKey) {
+      explodedViewLayout = PointScapeExplodedView.createLayout(currentTileIndex,
+        terrainToggle.checked ? getTerrainExaggeration() : 1);
+      layer.setTiles(currentTileIndex, map);
+      layer.geometryKey = geometryKey;
+    }
+    return;
+  }
+
   if (!lodDetailBoxesToggle?.checked) {
     layer.setTiles([], map);
     return;
@@ -1709,6 +2053,98 @@ function updateDetailBoxesLayer() {
     currentPendingDetailTileIds.has(tile.id),
   );
   layer.setTiles(pendingTiles, map);
+}
+
+function resetExplodedView() {
+  pointscapeExplodedLoader.cancel();
+  cancelAnimationFrame(explodedViewAnimation);
+  explodedViewAnimation = 0;
+  explodedViewActive = false;
+  explodedViewProgress = 0;
+  explodedViewLayout = { maxDepth: 0, levelSpacingMeters: 0 };
+  currentTileById = new Map();
+  explodedViewButton.disabled = true;
+  explodedViewButton.setAttribute("aria-pressed", "false");
+  explodedViewButton.textContent = "Exploded View";
+}
+
+function toggleExplodedView() {
+  if (explodedViewButton.disabled || !currentTileIndex.length) return;
+  explodedViewActive = !explodedViewActive;
+  explodedViewButton.setAttribute("aria-pressed", String(explodedViewActive));
+  explodedViewButton.textContent = explodedViewActive ? "Normal View" : "Exploded View";
+  if (explodedViewActive) {
+    pointscapeLodStreamer.reset();
+    restartExplodedViewLoading();
+  } else {
+    pointscapeExplodedLoader.cancel();
+    applyPointCloudTileSelection({ updateStatus: true });
+  }
+  updateDetailBoxesLayer();
+  const roots = currentTileIndex.filter((tile) => !tile.parentId);
+  flyToPointCloudTiles(roots, {
+    duration: 1100,
+    extraAltitudeMeters: explodedViewActive
+      ? PointScapeExplodedView.offsetMeters(0, explodedViewLayout) : 0,
+  });
+
+  const start = performance.now();
+  const from = explodedViewProgress;
+  const to = explodedViewActive ? 1 : 0;
+  const duration = 1100 * Math.abs(to - from);
+  cancelAnimationFrame(explodedViewAnimation);
+  const animate = (now) => {
+    const fraction = duration ? Math.min(1, (now - start) / duration) : 1;
+    explodedViewProgress = from + (to - from) *
+      PointScapeExplodedView.easeInOutCubic(fraction);
+    window.mapLibreMap?.triggerRepaint();
+    if (fraction < 1) {
+      explodedViewAnimation = requestAnimationFrame(animate);
+    } else {
+      explodedViewProgress = to;
+      explodedViewAnimation = 0;
+      if (!explodedViewActive) updateDetailBoxesLayer();
+    }
+  };
+  explodedViewAnimation = requestAnimationFrame(animate);
+}
+
+async function restartExplodedViewLoading() {
+  if (!explodedViewActive || !window.pointCloudLayer || !window.mapLibreMap) return;
+  pointscapeExplodedLoader.cancel();
+  const generation = pointscapeExplodedLoader.generation;
+  try {
+    const incomplete = [...copcTileSources].filter(([fileIndex]) =>
+      currentTileIndex.some(tile => tile.fileIndex === fileIndex && tile.hierarchyPending));
+    if (incomplete.length) {
+      lasStatus.textContent = "Reading the full COPC hierarchy for Exploded View…";
+      for (const [fileIndex, source] of incomplete) {
+        source.allPages ||= source.client.request("all-pages").catch(error => {
+          source.allPages = null;
+          throw error;
+        });
+        const tiles = await source.allPages;
+        if (!explodedViewActive || generation !== pointscapeExplodedLoader.generation ||
+            copcTileSources.get(fileIndex) !== source) return;
+        integrateCopcTiles(tiles);
+      }
+      updateDetailBoxesLayer();
+    }
+  } catch (error) {
+    if (!explodedViewActive || generation !== pointscapeExplodedLoader.generation) return;
+    toggleExplodedView();
+    lasStatus.textContent = `Exploded View could not read the COPC hierarchy: ${error.message}`;
+    return;
+  }
+  window.pointCloudLayer.setTiles([], window.mapLibreMap, { forceRebuild: true });
+  currentPointCloudPoints = [];
+  updateLivePointCloudStats(0, 0, 0);
+  pointscapeExplodedLoader.start(currentTileIndex, pointCloudConfig.explodedPointFraction)
+    .catch((error) => {
+      if (!explodedViewActive) return;
+      console.error(error);
+      lasStatus.textContent = `Exploded View could not load the point data: ${error.message}`;
+    });
 }
 
 function createBlockBoundsGeoJson(blocks) {
@@ -1922,6 +2358,20 @@ function syncPointSizingControlsFromConfig() {
   pointMaxRadiusValue.textContent = `${formatNumber(pointCloudConfig.pointMaximumRadiusPixels, 0)} px`;
 }
 
+function syncEdlControlsFromConfig() {
+  edlToggle.checked = pointCloudConfig.edlEnabled;
+  edlStrengthControl.value = String(pointCloudConfig.edlStrength);
+  edlRadiusControl.value = String(pointCloudConfig.edlRadiusPixels);
+  edlNeighborsControl.value = String(pointCloudConfig.edlNeighborCount);
+  edlStrengthValue.textContent = pointCloudConfig.edlStrength.toFixed(1);
+  edlRadiusValue.textContent = `${pointCloudConfig.edlRadiusPixels.toFixed(1)} px`;
+  edlNeighborsValue.textContent = String(pointCloudConfig.edlNeighborCount);
+  const disabled = !pointCloudConfig.edlEnabled;
+  [edlStrengthControl, edlRadiusControl, edlNeighborsControl].forEach(
+    (control) => { control.disabled = disabled; },
+  );
+}
+
 function getSelectedLasIndexingMode() {
   return (
     Array.from(lasIndexingModeInputs).find((input) => input.checked)?.value ||
@@ -2021,10 +2471,22 @@ function refreshTileBounds() {
   }
 }
 
-function getLasFiles(fileList) {
+function getPointCloudFiles(fileList) {
   return Array.from(fileList || []).filter((file) =>
-    file.name.toLowerCase().endsWith(".las"),
+    /\.(las|laz|copc)$/i.test(file.name),
   );
+}
+
+async function isCopcInput(file) {
+  if (file.url) return true;
+  const bytes = new Uint8Array(await file.slice(0, 429).arrayBuffer());
+  if (PointScapeCopcReader.hasCopcSignature(bytes)) return true;
+  if (/\.las$/i.test(file.name)) return false;
+  throw new Error(`${file.name}: expected a COPC octree. Standard compressed LAZ is unsupported.`);
+}
+
+function loadCopcDemo(demo) {
+  return loadPointCloudFiles([copcDemos.get(demo)]);
 }
 
 function resetVolatileTileDb() {
@@ -2157,7 +2619,62 @@ function stripTileRecordPointPayload(record) {
 }
 
 async function getStoredTileRecord(tileKey) {
+  if (tileKey.startsWith("copc:")) return getTileRepresentation(tileKey, "sample");
   return pointscapeTileStore.getRecord(tileKey);
+}
+
+function getTileRepresentation(tileKey, source, signal) {
+  if (tileKey.startsWith("copc:")) {
+    const fileIndex = Number(tileKey.split(":", 3)[1]);
+    const dataset = copcTileSources.get(fileIndex);
+    const tile = currentTileById.get(tileKey);
+    if (source === "full" || !dataset || !tile?.copcChunk) return null;
+    return copcDecodePool.read({ source: dataset.input, decodeInfo: dataset.decodeInfo,
+      tile, representation: source }, signal);
+  }
+  return pointscapeTileStore.getRepresentation(tileKey, source);
+}
+
+function integrateCopcTiles(tiles) {
+  if (!tiles.length) return;
+  currentTileIndex = mergeTileMetadataRecords(currentTileIndex, tiles);
+  for (const tile of tiles) currentTileById.set(tile.id, tile);
+  if (!currentPointCloudStats || !currentPointCloudSummary) return;
+  currentPointCloudSummary.tileCount = currentTileIndex.length;
+  currentPointCloudStats.tileCount = currentTileIndex.length;
+  currentPointCloudStats.hierarchyPartial = currentTileIndex.some(tile => tile.hierarchyPending);
+  currentPointCloudStats.maxPointsPerNode = currentTileIndex.reduce(
+    (maximum, tile) => Math.max(maximum, tile.sourcePointCount || 0), 0);
+  currentPointCloudStats.maxSampledPointsPerNode = currentTileIndex.reduce(
+    (maximum, tile) => Math.max(maximum, tile.sampledPointCount || 0), 0);
+  currentPointCloudStats.averagePointsPerNode = currentTileIndex.reduce(
+    (total, tile) => total + (tile.sourcePointCount || 0), 0) / currentTileIndex.length;
+  renderPointCloudStats();
+}
+
+function requestVisibleCopcPages(tiles, priority) {
+  const capacity = 2 - pendingCopcPages.size;
+  if (capacity <= 0) return;
+  const selected = tiles.filter(tile => !pendingCopcPages.has(tile.id) && !failedCopcPages.has(tile.id))
+    .sort((a, b) => priority(b) - priority(a)).slice(0, capacity);
+  for (const tile of selected) {
+    const source = copcTileSources.get(tile.fileIndex);
+    if (!source) continue;
+    const request = source.client.request("page", { tileId: tile.id });
+    pendingCopcPages.set(tile.id, request);
+    request.then(records => {
+      if (copcTileSources.get(tile.fileIndex) === source) integrateCopcTiles(records);
+    }).catch(error => {
+      if (copcTileSources.get(tile.fileIndex) !== source) return;
+      failedCopcPages.add(tile.id);
+      console.warn("COPC hierarchy page could not be read", tile.id, error);
+    }).finally(() => {
+      if (pendingCopcPages.get(tile.id) !== request) return;
+      pendingCopcPages.delete(tile.id);
+      pointCloudFinalFrameRefreshPending = true;
+      window.mapLibreMap?.triggerRepaint();
+    });
+  }
 }
 
 async function getStoredTileRecords(tileIds) {
@@ -2174,7 +2691,7 @@ window.pointscapeTileDb = {
 };
 
 function schedulePointCloudTileRefresh(options = {}) {
-  if (!currentPointCloudTiles.length) {
+  if (!currentTileIndex.length) {
     return;
   }
 
@@ -2183,7 +2700,7 @@ function schedulePointCloudTileRefresh(options = {}) {
 
 function schedulePointCloudTileRefreshAfterRenderedFrame() {
   const map = window.mapLibreMap;
-  if (!map || !currentPointCloudTiles.length) return;
+  if (!map || !currentTileIndex.length) return;
   if (!map.isMoving() && !pointCloudFinalFrameRefreshPending) return;
 
   pointCloudFinalFrameRefreshPending = false;
@@ -2196,11 +2713,12 @@ function schedulePointCloudTileRefreshAfterRenderedFrame() {
 }
 
 const pointscapeLodStreamer = new PointScapeLodStreaming.LodStreamer({
-  read: (id, source) => pointscapeTileStore.getRepresentation(id, source),
+  read: getTileRepresentation,
   select: PointScapeTileSelection.selectActiveTiles,
   yieldFrame: () => new Promise(resolve => requestAnimationFrame(resolve)),
   transitionHoldMs: pointCloudConfig.lodTransitionHoldMs,
   publish: (tiles) => {
+    if (explodedViewActive) return;
     const map = window.mapLibreMap;
     const layer = window.pointCloudLayer;
     if (!layer || !map) return;
@@ -2209,21 +2727,51 @@ const pointscapeLodStreamer = new PointScapeLodStreaming.LodStreamer({
     const ids = new Set(tiles.map(tile => tile.id));
     const metadata = currentTileIndex.filter(tile => ids.has(tile.id));
     updateBlockBoundsLayer(metadata);
-    const count = tiles.reduce((sum, tile) => sum + tile.pointCount, 0);
+    const voxelTiles = tiles.filter(tile => tile.voxelSizeMeters);
+    const voxelIds = new Set(voxelTiles.map(tile => tile.id));
+    const voxelInfo = {
+      nodeCount: voxelTiles.length,
+      count: voxelTiles.reduce((sum, tile) => sum + tile.pointCount, 0),
+      sourceCount: metadata.reduce((sum, tile) =>
+        sum + (voxelIds.has(tile.id) ? tile.sampledPointCount || 0 : 0), 0),
+    };
+    const count = tiles.reduce((sum, tile) => sum + tile.pointCount, 0) - voxelInfo.count;
     const available = metadata.reduce((sum, tile) => sum + (tile.sourcePointCount || tile.fullPointCount || tile.sampledPointCount || 0), 0);
-    updateLivePointCloudStats(count, available, tiles.length);
-    updatePointCloudStatus(count, available, tiles.length);
+    updateLivePointCloudStats(count, available, tiles.length, voxelInfo);
+    updatePointCloudStatus(count, available, tiles.length, voxelInfo);
     currentPendingDetailTileIds = getPendingDetailParentTileIds(
       (pointscapeLodStreamer.plan?.activeTiles || []).filter(tile => !ids.has(tile.id)).map(tile => tile.id));
     updateDetailBoxesLayer();
   },
 });
 
+const pointscapeExplodedLoader = new PointScapeExplodedView.Loader({
+  read: getTileRepresentation,
+  batchSize: 32,
+  yieldFrame: () => new Promise((resolve) => requestAnimationFrame(resolve)),
+  publish: (tiles, progress) => {
+    if (!explodedViewActive || !window.pointCloudLayer || !window.mapLibreMap) return;
+    window.pointCloudLayer.setTiles(tiles, window.mapLibreMap);
+    currentPointCloudPoints = window.pointCloudLayer.points;
+    updateLivePointCloudStats(progress.renderedPointCount, progress.sourcePointCount,
+      tiles.length);
+    const failures = progress.failedNodes
+      ? `; ${progress.failedNodes} nodes could not be loaded` : "";
+    lasStatus.textContent = `Exploded View: ${progress.loadedNodes.toLocaleString("en-US")} / ` +
+      `${progress.totalNodes.toLocaleString("en-US")} nodes loaded, ` +
+      `${progress.renderedPointCount.toLocaleString("en-US")} points ` +
+      `(${Math.round(progress.fraction * 100)}% per node)${failures}.`;
+  },
+});
+
 function applyPointCloudTileSelection(options = {}) {
-  if (!window.pointCloudLayer || !window.mapLibreMap || (lasLoadInProgress && !options.updateStatus)) return Promise.resolve();
+  if (explodedViewActive || !window.pointCloudLayer || !window.mapLibreMap ||
+      (pointCloudLoadInProgress && !options.updateStatus)) return Promise.resolve();
   ++pointCloudTileRefreshId;
   const map = window.mapLibreMap;
   const activeTiles = selectActiveTiles(currentTileIndex, map);
+  const voxelDecisions = pointscapeLodSystem.voxelByTileId;
+  updateVoxelDistanceInfo(voxelDecisions);
   const priorities = new Map();
   const byId = new Map(currentTileIndex.map(tile => [tile.id, tile]));
   for (const selected of activeTiles) {
@@ -2234,20 +2782,37 @@ function applyPointCloudTileSelection(options = {}) {
     }
   }
   const budget = pointCloudConfig.residentPointBudget;
+  const pendingPages = activeTiles.filter(tile => tile.hierarchyPending);
+  const renderTiles = activeTiles.filter(tile => !tile.hierarchyPending);
+  if (!pointCloudLoadInProgress) requestVisibleCopcPages(pendingPages, tile => priorities.get(tile.id) || 0);
   pointscapeLodStreamer.memoryBudgetBytes = Math.max(128 * 1024 * 1024, budget * 96);
   const completion = pointscapeLodStreamer.update({
     records: currentTileIndex,
-    activeTiles,
+    activeTiles: renderTiles,
     fullIds: new Set(pointscapeLodSystem.fullResolutionTileIds),
     fullCounts: new Map(pointscapeLodSystem.fullPointCounts),
     expandedIds: new Set(pointscapeLodSystem.expandedTileIds),
+    voxelIds: new Set([...voxelDecisions].filter(([, decision]) => decision.useVoxels).map(([id]) => id)),
     accumulated: currentPointCloudSummary?.indexingMode === "m3no",
     budget,
+    readConcurrency: copcDecodePool ? copcWorkerCount : 1,
     priority: tile => priorities.get(tile.id) || 0,
   });
   currentPendingDetailTileIds = getPendingDetailParentTileIds(activeTiles
     .filter(tile => !window.pointCloudLayer.tileBuffersById?.has(tile.id)).map(tile => tile.id));
   updateDetailBoxesLayer();
+  const movement = copcPerformance?.moveEndedAt;
+  if (movement != null && copcPerformance.detailMs === null && !pendingPages.length &&
+    renderTiles.length && !map.isMoving()) {
+    const refreshId = pointCloudTileRefreshId;
+    completion.then(() => {
+      if (refreshId !== pointCloudTileRefreshId || copcPerformance?.moveEndedAt !== movement ||
+        map.isMoving() || !pointscapeLodStreamer.plan ||
+        !pointscapeLodStreamer.areTargetRepresentationsReady(pointscapeLodStreamer.plan)) return;
+      copcPerformance.detailMs = performance.now() - movement;
+      renderPointCloudStats();
+    });
+  }
   return completion;
 }
 
@@ -2392,7 +2957,11 @@ function forEachPointInSet(pointSet, callback) {
 }
 
 function selectActiveTiles(records, map) {
-  const activeTiles = pointscapeLodSystem.selectActiveTiles(records, map);
+  const activeTiles = pointscapeLodSystem.selectActiveTiles(records, map, {
+    voxelEnabled: pointCloudConfig.voxelImpostors && Boolean(window.pointCloudLayer?.voxelMesh),
+    verticalScale: terrainToggle.checked ? getTerrainExaggeration() : 1,
+    offsetMeters: getPointCloudOffsetMeters(),
+  });
 
   currentExpandedTileIds = pointscapeLodSystem.expandedTileIds;
   currentActiveTileIds = pointscapeLodSystem.activeTileIds;
@@ -2693,7 +3262,20 @@ function getApproxMetersPerPixel(map, mapCenter) {
   return (earthCircumference * latitudeScale) / (512 * 2 ** zoom);
 }
 
-function updatePointCloudStatus(renderedPointCount, availablePointCount, activeTileCount) {
+function updateVoxelDistanceInfo(decisions) {
+  const status = document.querySelector("#voxel-distance");
+  const distances = [...decisions.values()];
+  const formatRange = key => {
+    const values = distances.map(decision => (decision[key] / 1000).toFixed(2)).sort((a, b) => a - b);
+    return values[0] === values.at(-1) ? values[0] : `${values[0]}–${values.at(-1)}`;
+  };
+  const text = distances.length
+    ? `Voxels from ~${formatRange("enterMeters")} km · points below ~${formatRange("exitMeters")} km`
+    : "";
+  if (status.textContent !== text) status.textContent = text;
+}
+
+function updatePointCloudStatus(renderedPointCount, availablePointCount, activeTileCount, voxels = { count: 0 }) {
   if (!currentPointCloudSummary) {
     return;
   }
@@ -2702,12 +3284,18 @@ function updatePointCloudStatus(renderedPointCount, availablePointCount, activeT
     fileCount,
     tileCount,
     crsSummary,
+    indexingMode,
     indexingModeLabel = "QuadTree",
   } = currentPointCloudSummary;
-  lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${renderedPointCount.toLocaleString("en-US")} sampled points rendered from ${availablePointCount.toLocaleString("en-US")} source points - ${crsSummary}`;
+  const pointSummary = indexingMode === "copc"
+    ? `${renderedPointCount.toLocaleString("en-US")} points rendered`
+    : `${renderedPointCount.toLocaleString("en-US")} points rendered from ${availablePointCount.toLocaleString("en-US")} visible source points`;
+  const voxelSummary = voxels.count
+    ? ` + ${voxels.count.toLocaleString("en-US")} voxels (${voxels.nodeCount} nodes)` : "";
+  lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${pointSummary}${voxelSummary} - ${crsSummary}`;
 }
 
-function updateLivePointCloudStats(renderedPointCount, availablePointCount, activeTileCount) {
+function updateLivePointCloudStats(renderedPointCount, availablePointCount, activeTileCount, voxels = null) {
   if (!currentPointCloudStats) {
     return;
   }
@@ -2715,6 +3303,7 @@ function updateLivePointCloudStats(renderedPointCount, availablePointCount, acti
   currentPointCloudStats.renderedPointCount = renderedPointCount;
   currentPointCloudStats.visibleSourcePointCount = availablePointCount;
   currentPointCloudStats.activeTileCount = activeTileCount;
+  currentPointCloudStats.voxels = voxels;
   renderPointCloudStats();
 }
 
@@ -2728,13 +3317,19 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
     return;
   }
 
+  const copcOnly = stats.indexingMode === "copc";
+  const { count: renderedVoxels = 0, sourceCount: replacedPoints = 0 } = stats.voxels ?? {};
+  const savedElements = replacedPoints - renderedVoxels;
+  const savingsLabel = replacedPoints > 0
+    ? `${formatInteger(savedElements)} (${formatNumber(100 * savedElements / replacedPoints, 1)}%)`
+    : "0";
   const groups = [
     {
       title: "Structure",
       rows: [
         ["Type", stats.indexingModeLabel],
         ["Files", formatInteger(stats.fileCount)],
-        ["Nodes", formatInteger(stats.tileCount)],
+        [stats.hierarchyPartial ? "Nodes discovered" : "Nodes", formatInteger(stats.tileCount)],
         ["Active nodes", formatInteger(stats.activeTileCount || 0)],
         ["Loaded node bounds", blockBoundsToggle.checked ? "On" : "Off"],
       ],
@@ -2754,24 +3349,33 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
           `${formatNumber(pointCloudConfig.tileCollapseHysteresisRatio * 100, 0)}%`,
         ],
         ["Max points on screen", formatInteger(pointCloudConfig.residentPointBudget)],
-        [
-          "Min node diagonal",
+        ...(copcOnly ? [] : [[
+          "LAS min node diagonal",
           `${formatInteger(pointCloudConfig.tileMinDiagonalMeters)} m`,
         ],
-        ["Max tree depth", formatInteger(pointCloudConfig.tileMaxDepth)],
+        ["LAS max tree depth", formatInteger(pointCloudConfig.tileMaxDepth)]]),
       ],
     },
     {
       title: "Points",
       rows: [
-        ["LAS points", formatInteger(stats.sourcePointCount)],
-        ["Valid projected", formatInteger(stats.validPointCount)],
+        ["Source points", formatInteger(stats.sourcePointCount)],
+        ...(copcOnly ? [] : [["Valid points", formatInteger(stats.validPointCount)]]),
         ["Rendered now", formatInteger(stats.renderedPointCount || 0)],
         ["Visible source", formatInteger(stats.visibleSourcePointCount || 0)],
+        ...(renderedVoxels ? [
+          ["Voxels", formatInteger(renderedVoxels)],
+          ["Points represented by voxels", formatInteger(replacedPoints)],
+        ] : []),
+        ...(stats.voxels && (copcOnly || renderedVoxels) ? [
+          ["Render elements saved", savingsLabel],
+        ] : []),
         ["Max / node", formatInteger(stats.maxPointsPerNode)],
         ["Avg / node", formatNumber(stats.averagePointsPerNode, 1)],
-        ["Max sampled / node", formatInteger(stats.maxSampledPointsPerNode)],
-        ["Max full / leaf", formatInteger(stats.maxFullPointsPerLeaf)],
+        ...(copcOnly ? [] : [
+          ["Max sampled / node", formatInteger(stats.maxSampledPointsPerNode)],
+          ["Max full / leaf", formatInteger(stats.maxFullPointsPerLeaf)],
+        ]),
       ],
     },
     {
@@ -2786,11 +3390,17 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
     {
       title: "Timing",
       rows: [
+        ...(copcPerformance ? [
+          ["First cloud frame", Number.isFinite(copcPerformance.firstFrameMs) ?
+            formatDuration(copcPerformance.firstFrameMs) : "—"],
+          ["Detail after camera stops", Number.isFinite(copcPerformance.detailMs) ?
+            formatDuration(copcPerformance.detailMs) : "—"],
+        ] : []),
         ["Total", formatDuration(stats.totalMs)],
         ["Read", formatDuration(stats.readMs)],
         ["Index", formatDuration(stats.indexMs)],
         ["IndexedDB", formatDuration(stats.saveMs)],
-        ["Rate", `${formatNumber(stats.pointsPerSecond, 2)} pts/s`],
+        ...(copcOnly ? [] : [["Rate", `${formatNumber(stats.pointsPerSecond, 2)} pts/s`]]),
       ],
     },
   ];
@@ -2942,10 +3552,10 @@ function createPointCloudStats({
     sourcePointCount,
     validPointCount,
     renderedPointCount: 0,
-    maxPointsPerNode: Math.max(0, ...pointCounts),
+    maxPointsPerNode: pointCounts.reduce((max, count) => Math.max(max, count), 0),
     averagePointsPerNode: tiles.length ? totalNodePointReferences / tiles.length : 0,
-    maxSampledPointsPerNode: Math.max(0, ...sampledCounts),
-    maxFullPointsPerLeaf: Math.max(0, ...fullLeafCounts),
+    maxSampledPointsPerNode: sampledCounts.reduce((max, count) => Math.max(max, count), 0),
+    maxFullPointsPerLeaf: fullLeafCounts.reduce((max, count) => Math.max(max, count), 0),
     crsSummary:
       uniqueCrsLabels.length === 1
         ? uniqueCrsLabels[0]
@@ -3004,12 +3614,12 @@ function updateProgressivePointCloudStats({
   currentPointCloudStats.tileCount = tiles.length;
   currentPointCloudStats.sourcePointCount = sourcePointCount;
   currentPointCloudStats.validPointCount = validPointCount;
-  currentPointCloudStats.maxPointsPerNode = Math.max(0, ...pointCounts);
+  currentPointCloudStats.maxPointsPerNode = pointCounts.reduce((max, count) => Math.max(max, count), 0);
   currentPointCloudStats.averagePointsPerNode = tiles.length
     ? totalNodePointReferences / tiles.length
     : 0;
-  currentPointCloudStats.maxSampledPointsPerNode = Math.max(0, ...sampledCounts);
-  currentPointCloudStats.maxFullPointsPerLeaf = Math.max(0, ...fullLeafCounts);
+  currentPointCloudStats.maxSampledPointsPerNode = sampledCounts.reduce((max, count) => Math.max(max, count), 0);
+  currentPointCloudStats.maxFullPointsPerLeaf = fullLeafCounts.reduce((max, count) => Math.max(max, count), 0);
   currentPointCloudStats.crsSummary =
     uniqueCrsLabels.length === 1
       ? uniqueCrsLabels[0]
@@ -3093,41 +3703,54 @@ function formatLngLatBounds(bounds) {
   return `${bounds.minLng.toFixed(5)}, ${bounds.minLat.toFixed(5)} / ${bounds.maxLng.toFixed(5)}, ${bounds.maxLat.toFixed(5)}`;
 }
 
-let lasLoadInProgress = false;
-async function loadLasFiles(files) {
-  if (lasLoadInProgress) return;
+let pointCloudLoadInProgress = false;
+async function loadPointCloudFiles(files) {
+  if (pointCloudLoadInProgress || !files.length) return;
   if (!window.pointCloudLayer || !window.mapLibreMap) {
     lasStatus.textContent = "Wait for the map to finish loading.";
     return;
   }
 
   const fileLabel =
-    files.length === 1 ? files[0].name : `${files.length} LAS files`;
-  const indexingMode = getSelectedLasIndexingMode();
-  const indexingModeLabel = getLasIndexingModeLabel(indexingMode);
-  lasStatus.textContent = `Preparing ${fileLabel} with ${indexingModeLabel}...`;
-  const loadStartedAt = performance.now();
-  currentPointCloudStats = createLoadingStats(
-    indexingMode,
-    indexingModeLabel,
-    files.length,
-  );
-  currentPointCloudSummary = {
-    fileCount: files.length,
-    tileCount: 0,
-    crsSummary: "Detecting...",
-    indexingMode,
-    indexingModeLabel,
-  };
-  renderPointCloudStats();
-
-  lasLoadInProgress = true;
-  window.nodeInspector?.reset();
-  pointCloudTileRefreshId += 1;
-  pointscapeLodStreamer.reset();
+    files.length === 1 ? files[0].name : `${files.length} point cloud files`;
+  pointCloudLoadInProgress = true;
   lasFileInput.disabled = true;
+  copcDemoButton.disabled = true;
+  parisDemoButton.disabled = true;
+  const loadStartedAt = performance.now();
+  lasStatus.textContent = `Opening ${fileLabel}...`;
   try {
-    await clearVolatileTileDb();
+    const copcInputs = await Promise.all(files.map(isCopcInput));
+    const copcOnly = copcInputs.every(Boolean);
+    const lasMode = getSelectedLasIndexingMode();
+    const lasModeLabel = getLasIndexingModeLabel(lasMode);
+    const indexingMode = copcOnly ? "copc" : lasMode;
+    const indexingModeLabel = copcOnly ? "COPC octree" :
+      copcInputs.some(Boolean) ? `${lasModeLabel} + COPC octree` : lasModeLabel;
+    lasStatus.textContent = `Preparing ${fileLabel} with ${indexingModeLabel}...`;
+    currentPointCloudStats = createLoadingStats(indexingMode, indexingModeLabel, files.length);
+    currentPointCloudSummary = {
+      fileCount: files.length,
+      tileCount: 0,
+      crsSummary: "Detecting...",
+      indexingMode,
+      indexingModeLabel,
+    };
+    renderPointCloudStats();
+
+    resetExplodedView();
+    window.nodeInspector?.reset();
+    pointCloudTileRefreshId += 1;
+    pointscapeLodStreamer.reset();
+    for (const source of copcTileSources.values()) source.client.close();
+    copcTileSources.clear();
+    pendingCopcPages.clear();
+    failedCopcPages.clear();
+    copcDecodePool?.close();
+    const includesCopc = copcInputs.some(Boolean);
+    copcDecodePool = includesCopc ? new PointScapeDataIngestion.CopcDecodePool(copcWorkerCount) : null;
+    copcPerformance = includesCopc ? { startedAt: loadStartedAt, firstFrameMs: null, detailMs: null } : null;
+    if (!copcOnly) await clearVolatileTileDb();
     currentPointCloudPoints = [];
     currentPointCloudFlyToPoints = [];
     currentPointCloudTiles = [];
@@ -3135,7 +3758,9 @@ async function loadLasFiles(files) {
     currentExpandedTileIds = new Set();
     currentPendingDetailTileIds = new Set();
     pointscapeLodSystem.reset();
+    updateVoxelDistanceInfo(new Map());
     currentTileIndex = [];
+    currentTileById = new Map();
     currentTileCrsByFile = new Map();
     window.pointCloudLayer.setTiles([], window.mapLibreMap, {
       forceRebuild: true,
@@ -3219,12 +3844,39 @@ async function loadLasFiles(files) {
 
       const percent =
         details.total > 0 ? Math.round((details.processed / details.total) * 100) : 0;
-      lasStatus.textContent = `Building ${indexingModeLabel} tiles - ${percent}% - showing ${allTiles.length.toLocaleString("en-US")} nodes...`;
+      lasStatus.textContent = `Building ${lasModeLabel} tiles - ${percent}% - showing ${allTiles.length.toLocaleString("en-US")} nodes...`;
     };
 
     for (let index = 0; index < files.length; index += 1) {
       const file = files[index];
-      lasStatus.textContent = `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length})...`;
+      if (copcInputs[index]) {
+        lasStatus.textContent = `Reading the COPC hierarchy in ${file.name} (${index + 1}/${files.length})...`;
+        const client = new PointScapeDataIngestion.CopcTileSource();
+        const input = file.url || file;
+        const readStartedAt = performance.now();
+        let result;
+        try {
+          result = await client.request("open", { source: input, fileIndex: index, fileName: file.name,
+            progressive: progressiveCopcHierarchy });
+        } catch (error) {
+          client.close();
+          throw error;
+        }
+        copcTileSources.set(index, { client, input, decodeInfo: result.decodeInfo });
+        crsLabelByFile.set(index, result.crsLabel);
+        crsByFile.set(index, result.crs);
+        sourcePointCountByFile.set(index, result.sourcePointCount);
+        allTiles = mergeTileMetadataRecords(allTiles, result.tiles);
+        fileStats.push({
+          name: file.name,
+          sourcePointCount: result.sourcePointCount,
+          validPointCount: result.validPointCount,
+          tileCount: result.tiles.length,
+          readMs: performance.now() - readStartedAt,
+        });
+        continue;
+      }
+      lasStatus.textContent = `Building ${lasModeLabel} tiles from ${file.name} (${index + 1}/${files.length})...`;
       const readStartedAt = performance.now();
       // Send the File handle; the worker reads bounded slices on demand.
       const readFinishedAt = performance.now();
@@ -3249,7 +3901,7 @@ async function loadLasFiles(files) {
         onProgress: (processed, total, details) => {
           const percent = Math.round((processed / total) * 100);
           if (details) {
-            lasStatus.textContent = `Building ${indexingModeLabel} - ${percent}% saved - ${details.phase} - ${(details.scanned || 0).toLocaleString("en-US")} points in node - ${details.nodes} nodes`;
+            lasStatus.textContent = `Building ${lasModeLabel} - ${percent}% saved - ${details.phase} - ${(details.scanned || 0).toLocaleString("en-US")} points in node - ${details.nodes} nodes`;
             if (performance.now() - lastProgressLog > 2000 || details.phase === "complete") {
               lastProgressLog = performance.now();
               console.info("LAS progress", { percentSaved: percent, ...details });
@@ -3257,8 +3909,8 @@ async function loadLasFiles(files) {
             return;
           }
           lasStatus.textContent = useProgressiveLoadingPreview
-            ? `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}% - ${allTiles.length.toLocaleString("en-US")} nodes visible...`
-            : `Building ${indexingModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}%...`;
+            ? `Building ${lasModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}% - ${allTiles.length.toLocaleString("en-US")} nodes visible...`
+            : `Building ${lasModeLabel} tiles from ${file.name} (${index + 1}/${files.length}) - ${percent}%...`;
         },
       });
       const indexFinishedAt = performance.now();
@@ -3266,7 +3918,7 @@ async function loadLasFiles(files) {
 
       const saveStartedAt = performance.now();
       if (!receivedProgressiveTiles) {
-        lasStatus.textContent = `Saving ${result.tileRecords.length.toLocaleString("en-US")} ${indexingModeLabel} tiles from ${file.name}...`;
+        lasStatus.textContent = `Saving ${result.tileRecords.length.toLocaleString("en-US")} ${lasModeLabel} tiles from ${file.name}...`;
         await saveTileRecords(result.tileRecords);
       }
       const saveFinishedAt = performance.now();
@@ -3289,6 +3941,10 @@ async function loadLasFiles(files) {
     }
 
     currentTileIndex = allTiles;
+    currentTileById = new Map(allTiles.map((tile) => [tile.id, tile]));
+    explodedViewLayout = PointScapeExplodedView.createLayout(allTiles,
+      terrainToggle.checked ? getTerrainExaggeration() : 1);
+    explodedViewButton.disabled = allTiles.length === 0;
     currentTileCrsByFile = new Map(crsByFile);
     updateBlockBoundsLayer(allTiles.filter((tile) => !tile.parentId));
     currentPointCloudFlyToPoints = [];
@@ -3317,15 +3973,24 @@ async function loadLasFiles(files) {
       indexingMode,
       indexingModeLabel,
     };
+    currentPointCloudStats.hierarchyPartial = allTiles.some(tile => tile.hierarchyPending);
     renderPointCloudStats();
-    await applyPointCloudTileSelection({ updateStatus: true });
+    if (includesCopc) {
+      lasStatus.textContent = `${indexingModeLabel} ready. Loading visible nodes…`;
+      pointCloudFinalFrameRefreshPending = true;
+      window.mapLibreMap.triggerRepaint();
+    } else {
+      await applyPointCloudTileSelection({ updateStatus: true });
+    }
   } catch (error) {
     console.error(error);
     lasStatus.textContent =
-      error.message || "The LAS files could not be read.";
+      error.message || "The point cloud files could not be read.";
   } finally {
-    lasLoadInProgress = false;
+    pointCloudLoadInProgress = false;
     lasFileInput.disabled = false;
+    copcDemoButton.disabled = false;
+    parisDemoButton.disabled = false;
     lasFileInput.value = "";
   }
 }
@@ -3403,7 +4068,10 @@ function allocateRareClassBudgets(classCounts, maximumPoints) {
 function flyToCurrentPointCloud() {
   const rootTiles = currentTileIndex.filter((tile) => !tile.parentId);
 
-  if (rootTiles.length && flyToPointCloudTiles(rootTiles)) {
+  if (rootTiles.length && flyToPointCloudTiles(rootTiles, {
+    extraAltitudeMeters: explodedViewActive
+      ? PointScapeExplodedView.offsetMeters(0, explodedViewLayout) : 0,
+  })) {
     return;
   }
 
@@ -3444,7 +4112,7 @@ function flyToLasPoints(points) {
   pitchValue.textContent = `${pitchControl.value}\u00b0`;
 }
 
-function flyToPointCloudTiles(tiles, { duration = 1200 } = {}) {
+function flyToPointCloudTiles(tiles, { duration = 1200, extraAltitudeMeters = 0 } = {}) {
   const bounds = getTilesLngLatBounds(tiles);
 
   if (!bounds || !window.mapLibreMap) {
@@ -3466,12 +4134,13 @@ function flyToPointCloudTiles(tiles, { duration = 1200 } = {}) {
     ...tiles.map((tile) => (Number.isFinite(tile.maxZ) ? tile.maxZ : 0)),
   );
   const cameraAltitudeMeters =
-    maxTileAltitude +
+    maxTileAltitude + extraAltitudeMeters +
     Math.max(pointCloudConfig.flyToClearanceMeters, maxDiagonalMeters * 0.7);
   const targetZoom = getZoomForApproxCameraAltitude(
     center.lat,
     cameraAltitudeMeters,
     targetPitch,
+    extraAltitudeMeters > 0 ? 0 : 8,
   );
 
   if (typeof window.mapLibreMap.stop === "function") {
@@ -3533,7 +4202,7 @@ function getPointCloudMaxRenderedAltitude(points) {
   return maxAltitude;
 }
 
-function getZoomForApproxCameraAltitude(lat, altitudeMeters, pitch) {
+function getZoomForApproxCameraAltitude(lat, altitudeMeters, pitch, minimumZoom = 8) {
   const viewportHeight = Math.max(window.innerHeight || 900, 1);
   const fovRadians = 36.87 * (Math.PI / 180);
   const pitchRadians = pitch * (Math.PI / 180);
@@ -3547,7 +4216,7 @@ function getZoomForApproxCameraAltitude(lat, altitudeMeters, pitch) {
     (earthCircumference * latitudeScale) / (512 * metersPerPixel),
   );
 
-  return Math.min(Math.max(zoom, 8), 18);
+  return Math.min(Math.max(zoom, minimumZoom), 18);
 }
 
 function getPointCloudCenter(points) {

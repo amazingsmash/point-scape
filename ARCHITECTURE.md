@@ -40,7 +40,11 @@ classes together during startup.
 - `pointscape-ui-controller.js`: `PointScapeUiController`, responsible for UI
   event binding and DOM-to-application action routing.
 - `pointscape-data-ingestion.js`: `LasDataIngestionService` for worker-based LAS
-  parsing and `VolatileTileStore` for the session-only IndexedDB tile cache.
+  parsing, `VolatileTileStore` for the session-only IndexedDB tile cache, and
+  `CopcTileSource` and `CopcDecodePool` for COPC worker requests.
+- `pointscape-copc-reader.js` and `copc.worker.js`: recognize COPC file headers,
+  read embedded octree pages through file slices or HTTP byte ranges, and decode
+  requested LAZ chunks using the bundled WebAssembly decoder.
 - `pointscape-octree-builder.js`: `PointScapeOctreeBuilder`, responsible for
   LAS parsing, CRS detection, QuadTree/M3NO tile construction, sampling, and
   transferable result packaging inside the worker.
@@ -51,7 +55,7 @@ classes together during startup.
   hysteresis, and behind-camera culling.
 - `tile-selection.js`: pure traversal helpers used by the LOD system and unit
   tests.
-- `pointscape-lod-streaming.js`: prioritized single-read streaming, sample
+- `pointscape-lod-streaming.js`: prioritized, bounded streaming, sample
   fallback residency, atomic QuadTree swaps, and conservative screen projection.
 - `tests/`: Node test suite for pure logic.
 
@@ -96,16 +100,18 @@ levels up to full resolution, using a deterministic nested point permutation.
 The streamer tracks the latest desired plan separately from resident payloads.
 It keeps ancestor samples and the last complete displayed frame for up to 220 ms
 while successor payloads arrive, without exceeding the point budget. It reads
-one eligible representation at a time in visual-priority order and yields to
-animation frames between uploads. QuadTree parents remain until all required
-child samples are ready. A completed read is adopted only if the latest plan
-still needs it; dataset epochs reject all previous-dataset reads. Camera-driven
+eligible representations in visual-priority order, with one LAS read or a
+bounded group of COPC reads, and batches uploads into animation frames.
+QuadTree parents remain until all required child samples are ready. A completed
+read is adopted only if the latest plan still needs it. Dataset epochs reject
+all previous-dataset reads. Camera-driven
 selection is queued from the custom-layer render after the current MapLibre
 matrix is captured; `moveend` requests one final rendered-frame selection.
 
 IndexedDB version 2 stores samples in `tiles` and leaf payloads separately in
 `full-payloads`; inspector `getRecord` recombines them on demand. The streamer
-reserves packed-cache bytes plus display/staging allowance before each read.
+reserves packed-cache bytes, in-flight decompression and payload bytes, plus
+display/staging allowance before each read.
 Its accounting limit is max(128 MiB, display budget * 96 bytes), independently
 from the exact draw-point cap. This is allocation accounting, not total browser
 RAM measurement. An indivisible read that cannot fit retains sample coverage.
@@ -117,9 +123,9 @@ The transform units follow the pinned MapLibre 5.24
 [Mercator implementation](https://github.com/maplibre/maplibre-gl-js/blob/v5.24.0/src/geo/projection/mercator_transform.ts).
 
 1. The user selects or drops LAS files through the UI.
-2. `PointScapeUiController` calls the application action `loadLasFiles`.
-3. `loadLasFiles` delegates parsing to `LasDataIngestionService`.
-4. `LasDataIngestionService` sends the file buffer to `las-index.worker.js`.
+2. `PointScapeUiController` calls the application action `loadPointCloudFiles`.
+3. `loadPointCloudFiles` detects the input format and delegates LAS parsing to `LasDataIngestionService`.
+4. `LasDataIngestionService` sends the file handle to `las-index.worker.js`.
 5. The worker creates `PointScapeOctreeBuilder` and builds QuadTree or M3NO tile
    records.
 6. Tile payloads are stored in `VolatileTileStore` using IndexedDB.
@@ -128,6 +134,37 @@ The transform units follow the pinned MapLibre 5.24
    LOD controls change.
 9. Active tile payloads are hydrated from `VolatileTileStore`.
 10. The WebGL layer receives renderable tile buffers and draws the point cloud.
+
+### COPC ingestion
+
+The hierarchy worker opens the file and publishes the native root page,
+including nodes that refer to unloaded pages. When the LOD selector admits one
+of those nodes, the app requests that page and merges its metadata into the
+existing index. Exploded View can explicitly resolve all remaining pages.
+
+Selection accumulates parent and child points because they represent distinct
+points in a COPC octree. The streamer, inspector and exploded view share a pool
+of decoder workers. A worker reads the selected node's compressed byte range
+and emits the packed coordinates and classifications used by the renderer.
+Obsolete node fetches receive an abort signal. A running decode can finish
+before the worker observes cancellation, and the streamer discards its result.
+COPC payloads stay in the rendering cache while needed.
+
+### COPC voxel impostors
+
+For a distant level-1 node, the LOD selector may request a voxel representation
+and stop refining that branch. The worker decodes the same COPC chunk and
+returns one center and dominant classification per occupied cell. The cube
+side is the longest node axis in meters divided by 48. WebGL2 draws the
+centers as instanced cubes with the same depth and classification passes as
+points.
+
+The entry distance is the voxel side times the focal length in CSS pixels
+divided by the configured target size. The viewer accounts for vertical
+exaggeration and measures from the camera to the nearest part of the node
+box. The exit distance is 80% of entry. The streamer keeps the previous
+representation until its replacement is ready and continues to budget the
+original node cost.
 
 Each tile buffer stores the metres-to-Mercator scale at its geographic anchor.
 During rendering, the vertex shader combines that scale, the configured physical
@@ -169,3 +206,5 @@ node --test
 ```
 
 Add tests around each extracted class as its dependencies become more explicit.
+The COPC test uses PDAL's
+[`1.2-with-color.copc.laz` fixture](https://github.com/PDAL/PDAL/blob/master/test/data/copc/1.2-with-color.copc.laz).

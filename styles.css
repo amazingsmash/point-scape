@@ -91,6 +91,13 @@ body {
   max-width: 560px;
   height: 150px;
   object-fit: contain;
+  opacity: 0;
+  transition: opacity 900ms ease;
+}
+
+.splash-logo-card img.is-visible,
+.institutional-logo.is-visible {
+  opacity: 1;
 }
 
 .splash-signature {
@@ -144,6 +151,15 @@ body {
   width: 42px;
   height: 30px;
   object-fit: contain;
+  opacity: 0;
+  transition: opacity 900ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .splash-logo-card img,
+  .institutional-logo {
+    transition: none;
+  }
 }
 
 .github-link {
@@ -620,6 +636,22 @@ body {
 .fly-button:focus-visible {
   outline: 3px solid rgba(244, 111, 94, 0.34);
   outline-offset: 2px;
+}
+
+.exploded-view-button {
+  margin-top: 8px;
+  background: #344b62;
+  box-shadow: 0 8px 18px rgba(19, 36, 50, 0.2);
+}
+
+.exploded-view-button[aria-pressed="true"] {
+  background: #186d8c;
+}
+
+.exploded-view-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .maplibregl-popup-content {

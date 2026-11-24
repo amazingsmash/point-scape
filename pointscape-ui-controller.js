@@ -18,6 +18,7 @@
       actions.renderClassificationLegend();
       actions.syncLodControlsFromConfig();
       actions.syncPointSizingControlsFromConfig();
+      actions.syncEdlControlsFromConfig();
       actions.renderPointCloudStats();
 
       elements.menuToggle.addEventListener("click", () => {
@@ -90,6 +91,23 @@
       elements.pointMinRadiusControl.addEventListener("input", updatePointSizing);
       elements.pointMaxRadiusControl.addEventListener("input", updatePointSizing);
 
+      const updateEdl = () => {
+        actions.config.edlEnabled = elements.edlToggle.checked;
+        actions.config.edlStrength = actions.readNumericControl(
+          elements.edlStrengthControl, actions.config.edlStrength,
+        );
+        actions.config.edlRadiusPixels = actions.readNumericControl(
+          elements.edlRadiusControl, actions.config.edlRadiusPixels,
+        );
+        actions.config.edlNeighborCount = Number(elements.edlNeighborsControl.value);
+        actions.syncEdlControlsFromConfig();
+        actions.getMap()?.triggerRepaint();
+      };
+      elements.edlToggle.addEventListener("change", updateEdl);
+      elements.edlStrengthControl.addEventListener("input", updateEdl);
+      elements.edlRadiusControl.addEventListener("input", updateEdl);
+      elements.edlNeighborsControl.addEventListener("input", updateEdl);
+
       elements.blockBoundsToggle.addEventListener("change", () => {
         actions.setBlockBoundsVisible(elements.blockBoundsToggle.checked);
         actions.renderPointCloudStats();
@@ -102,6 +120,16 @@
       elements.lodDetailBoxesToggle?.addEventListener("change", () => {
         actions.updateDetailBoxesLayer();
       });
+
+      const updateVoxels = () => {
+        actions.config.voxelImpostors = elements.voxelImpostorToggle.checked;
+        actions.config.voxelMaxPixels = Number(elements.voxelPixelControl.value);
+        elements.voxelPixelValue.textContent = `${actions.config.voxelMaxPixels} px`;
+        elements.voxelPixelControl.disabled = !actions.config.voxelImpostors;
+        actions.applyPointCloudTileSelection({ updateStatus: true });
+      };
+      elements.voxelImpostorToggle.addEventListener("change", updateVoxels);
+      elements.voxelPixelControl.addEventListener("input", updateVoxels);
 
       elements.randomizeClassificationColorsButton?.addEventListener("click", () => {
         actions.randomizeLasClassColors();
@@ -184,9 +212,9 @@
       });
 
       elements.lasFileInput.addEventListener("change", () => {
-        const files = actions.getLasFiles(elements.lasFileInput.files);
+        const files = actions.getPointCloudFiles(elements.lasFileInput.files);
         if (files.length) {
-          actions.loadLasFiles(files);
+          actions.loadPointCloudFiles(files);
         }
       });
 
@@ -205,17 +233,33 @@
       });
 
       elements.lasDrop.addEventListener("drop", (event) => {
-        const files = actions.getLasFiles(event.dataTransfer.files);
+        const files = actions.getPointCloudFiles(event.dataTransfer.files);
         if (files.length) {
-          actions.loadLasFiles(files);
+          actions.loadPointCloudFiles(files);
         } else {
           elements.lasStatus.textContent =
-            "Drop one or more files with the .las extension.";
+            "Drop one or more LAS (.las) or COPC (.laz) files.";
         }
       });
 
+      elements.copcDemoButton.addEventListener("click", () => actions.loadCopcDemo("copc"));
+      elements.parisDemoButton.addEventListener("click", () => actions.loadCopcDemo("paris"));
+
       elements.flyToPointCloudButton.addEventListener("click", () => {
         actions.flyToCurrentPointCloud();
+      });
+
+      elements.explodedViewButton.addEventListener("click", () => {
+        actions.toggleExplodedView();
+      });
+      elements.explodedDecimationControl.addEventListener("input", () => {
+        elements.explodedDecimationValue.textContent =
+          `${elements.explodedDecimationControl.value}%`;
+      });
+      elements.explodedDecimationControl.addEventListener("change", () => {
+        actions.config.explodedPointFraction =
+          Number(elements.explodedDecimationControl.value) / 100;
+        actions.restartExplodedViewLoading();
       });
     }
   }

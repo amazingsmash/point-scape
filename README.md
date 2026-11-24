@@ -1,6 +1,6 @@
 # PointScape
 
-PointScape is a web application for visualizing LiDAR point clouds in LAS format on top of an interactive map centered on Las Palmas de Gran Canaria. The project combines web mapping, 3D terrain, camera controls, and a custom WebGL point-cloud viewer that can load, classify, index, and explore points directly in the browser.
+PointScape is a web application for visualizing LAS and COPC LiDAR point clouds on an interactive map centered on Las Palmas de Gran Canaria. It combines 3D terrain, camera controls, and a WebGL point-cloud viewer that runs directly in the browser.
 
 The goal is to provide a technical and academic demonstrator for real-time point-cloud indexing and visualization. The application is intentionally lightweight and does not require a processing backend: LAS files are selected locally and the heavier work runs in the client.
 
@@ -17,16 +17,25 @@ Repository: <https://github.com/amazingsmash/point-scape>
 - Interactive map powered by MapLibre GL JS.
 - Satellite imagery and street-map base layers.
 - Terrain support, hillshading, and vertical exaggeration.
-- Local loading of one or more `.las` files.
+- Local loading of LAS and COPC, with automatic format detection for COPC files.
+- Direct reuse of the COPC octree and on-demand LAZ chunk decoding.
+- Progressive COPC hierarchy loading, with prioritized parallel decoding.
+- Optional voxel impostors for distant COPC children of the root.
 - WebGL visualization of points over the map.
 - Coloring by LAS classification.
+- Eye-Dome Lighting (EDL) depth shading with live strength, sample radius,
+  direction-count, and on/off controls.
 - Perspective point sizing with controls for physical radius, minimum screen
   radius, maximum screen radius, vertical offset, and depth advantage.
-- Selectable indexing mode: QuadTree or M3NO.
+- Selectable LAS indexing mode: QuadTree or M3NO.
 - Adaptive level-of-detail loading.
 - Optional display of loaded node bounds and tile labels.
 - Point-cloud statistics after loading.
 - `Fly To Point Cloud` camera action.
+- `Exploded View` animates tree levels vertically, outlines every indexed node,
+  and loads points from every node independently of LOD. The point fraction is
+  adjustable (10% by default); leaves use their full point payload and internal
+  nodes use their stored samples.
 - Corporate splash screen on startup.
 - GitHub repository shortcut in the interface.
 
@@ -65,10 +74,62 @@ On Windows, the repository also includes `lanzar.cmd` and `lanzar.ps1` as conven
 1. Open the application in the browser.
 2. Wait for the splash screen to fade out.
 3. Use the side panel to choose the base map, terrain, camera, and LOD parameters.
-4. Drag `.las` files into the drop zone or click it to select files.
+4. Drag LAS (`.las`) or COPC (`.copc.laz`, `.laz`, `.copc`) files into the drop zone or click it to select files. COPC uses the octree embedded in the file.
 5. Review the generated statistics and use `Fly To Point Cloud` to center the camera on the loaded data.
+6. Once indexing finishes, set the `Exploded View points` percentage and click
+   `Exploded View` to inspect the hierarchy. Click `Normal View` to restore LOD.
 
-LAS files are processed locally in the browser. They are not uploaded to any server.
+Local point cloud files stay in the browser. For COPC, PointScape reads the embedded hierarchy and decompresses individual nodes as the view needs them. COPC on the map requires a horizontal coordinate system declared in WKT and supported by Proj4.
+
+### COPC demo
+
+Click **Load COPC demo · Autzen Stadium** or open [the local COPC demo](http://127.0.0.1:5173/?demo=copc). PointScape opens the public Autzen Stadium cloud through HTTP byte ranges and moves the camera to its location. Zoom in to see the existing octree supply more detailed nodes. The source file contains 10,653,336 points. [COPC example data](https://copc.io/#example-data)
+
+### COPC voxel impostors
+
+In **Point cloud → COPC voxel impostors**, toggle the experiment or adjust the
+target projected voxel size. At the default of 5 pixels, each visible level-1
+node uses an occupied voxel grid once its estimated cell size reaches that
+screen size. The viewer switches back to points below 80% of the entry
+distance. The panel reports the estimated distances for the current viewport.
+Statistics report the rendered cubes, the source points they represent, and
+the difference. The percentage is relative to the points in the replaced nodes.
+
+**Load COPC demo · Paris** (or [the local Paris demo](http://127.0.0.1:5173/?demo=paris))
+opens a 16,339,239-point tile from IGN's LiDAR HD program around the Eiffel Tower.
+Zoom out to see the impostors and zoom in to see the ground and buildings as
+points. [IGN LiDAR HD](https://geoservices.ign.fr/lidarhd)
+
+The [local Millsite demo](http://127.0.0.1:5173/?demo=millsite) opens the
+374,609,447-point USGS sample for comparison. All demos read HTTP byte ranges
+on demand. [Millsite COPC](https://s3.amazonaws.com/hobu-lidar/millsite.copc.laz)
+
+### COPC loading performance
+
+PointScape can draw the cloud after reading the root hierarchy page. It requests
+more pages when the camera needs those branches. Two workers decode selected
+nodes in parallel on devices reporting at least four logical processors. The
+streamer prioritizes coverage and visible detail, cancels obsolete node
+requests, and groups GPU uploads across frames. Exploded View can discover the
+complete hierarchy on demand.
+
+One comparison in the same Windows browser timed the first cloud frame from
+opening each file and the time from the end of the second zoom-in to the
+requested detail being ready. Final views matched across configurations
+(1,490,890 rendered points in Paris and 1,367,600 in Millsite). Times depend on
+the range server, browser cache, and machine.
+
+| Hierarchy and workers | Paris first frame | Paris detail | Millsite first frame | Millsite detail |
+| --- | ---: | ---: | ---: | ---: |
+| Complete hierarchy, 1 worker | 2.73 s | 17.50 s | 22.90 s | 30.90 s |
+| Progressive, 1 worker | 2.66 s | 17.60 s | 1.98 s | 19.60 s |
+| Progressive, 2 workers (default) | 2.13 s | 4.32 s | 2.40 s | 17.10 s |
+| Progressive, 4 workers | 1.71 s | 5.13 s | 2.95 s | 13.70 s |
+
+The timings appear under **Point cloud stats → Timing**. To repeat the
+comparison, open a demo with `copcWorkers=1`, `copcWorkers=2`, or
+`copcWorkers=4`. Add `copcHierarchy=eager` to read the complete hierarchy
+before displaying points.
 
 ## Project Structure
 
@@ -135,6 +196,16 @@ that radius to local Mercator units and projects it using each vertex's clip-spa
 depth, so nearby points grow and distant points shrink. Minimum and maximum
 screen-radius clamps keep distant samples legible and prevent close points from
 covering the view. The defaults are 8 cm, 0.75 px minimum, and 24 px maximum.
+
+Eye-Dome Lighting renders the cloud into an auxiliary depth target, then compares
+each visible point pixel with nearby depth samples. A nearby point closer to the
+eye darkens a deeper pixel, making ridges and recesses easier to read without point
+normals. The regular map depth pass still decides whether terrain or map content
+occludes a point. The **Visual effects** section exposes the effect toggle,
+strength, sampling radius in screen pixels, and number of directions. Increasing
+the radius or direction count can make contours more apparent at a higher GPU
+cost. The technique follows the depth-neighborhood response described in
+[Potree's EDL shader](https://github.com/potree/potree/blob/develop/src/materials/shaders/edl.fs).
 
 The application uses a volatile IndexedDB database (`pointscape-volatile-tiles`) to manage tiles during the current session. This information is temporary and is rebuilt when data is loaded again.
 

@@ -4,6 +4,7 @@
       isTileVisible = () => true,
       shouldExpandTile = () => false,
       useAccumulatedLod = false,
+      accumulatesChildren = () => useAccumulatedLod,
       previousExpandedTileIds = new Set(),
       pointBudget = Infinity,
       getTilePointCost = () => 0,
@@ -47,7 +48,7 @@
       const children = (tile.childIds || []).map((id) => recordsById.get(id))
         .filter((child) => child && isTileVisible(child));
       if (!children.length) return;
-      if (useAccumulatedLod) {
+      if (accumulatesChildren(tile)) {
         for (const child of children) {
           push({ tile, children: [child], priority: getTilePriority(child) *
             (previousActiveTileIds.has(child.id) ? 1 + swapHysteresis : 1) });
@@ -104,12 +105,13 @@
         }
         continue;
       }
+      const additive = accumulatesChildren(tile);
       const extraCost = children.reduce((sum, child) => sum + getTilePointCost(child), 0)
-        - (useAccumulatedLod ? 0 : getTilePointCost(tile));
+        - (additive ? 0 : getTilePointCost(tile));
       if (used + extraCost > pointBudget) continue;
       used += extraCost;
       nextExpandedTileIds.add(tile.id);
-      if (!useAccumulatedLod) active.delete(tile.id);
+      if (!additive) active.delete(tile.id);
       for (const child of children) {
         active.set(child.id, child);
         enqueue(child);

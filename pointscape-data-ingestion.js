@@ -115,6 +115,97 @@
     }
   }
 
+  class CopcTileSource {
+    constructor() {
+      this.worker = new Worker("./copc.worker.js");
+      this.requests = new Map();
+      this.nextRequestId = 0;
+      this.worker.onmessage = ({ data: { requestId, result, error } }) => {
+        const request = this.requests.get(requestId);
+        if (!request) return;
+        this.requests.delete(requestId);
+        request.cleanup();
+        if (error) request.reject(new Error(error));
+        else request.resolve(result);
+      };
+      this.worker.onerror = event => this.close(event.message || "The COPC worker failed.");
+    }
+
+    request(type, data, signal) {
+      if (!this.worker) return Promise.reject(new Error("The COPC source is closed."));
+      if (signal?.aborted) return Promise.reject(signal.reason);
+      return new Promise((resolve, reject) => {
+        const requestId = ++this.nextRequestId;
+        const cancel = () => this.worker?.postMessage({ requestId, type: "cancel" });
+        const cleanup = () => signal?.removeEventListener("abort", cancel);
+        this.requests.set(requestId, { resolve, reject, cleanup });
+        signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          this.worker.postMessage({ requestId, type, ...data });
+        } catch (error) {
+          this.requests.delete(requestId);
+          cleanup();
+          reject(error);
+        }
+      });
+    }
+
+    close(message = "The COPC source was closed.") {
+      this.worker?.terminate();
+      this.worker = null;
+      for (const { reject, cleanup } of this.requests.values()) {
+        cleanup();
+        reject(new Error(message));
+      }
+      this.requests.clear();
+    }
+  }
+
+  class CopcDecodePool {
+    constructor(size) {
+      this.slots = Array.from({ length: size }, () => ({ client: null, busy: false }));
+      this.queue = [];
+      this.closed = false;
+    }
+
+    read(data, signal) {
+      if (this.closed) return Promise.reject(new Error("The COPC decoder pool is closed."));
+      return new Promise((resolve, reject) => {
+        this.queue.push({ data, signal, resolve, reject });
+        this.dispatch();
+      });
+    }
+
+    dispatch() {
+      if (this.closed) return;
+      for (const slot of this.slots) {
+        if (slot.busy) continue;
+        let job = this.queue.shift();
+        while (job?.signal?.aborted) {
+          job.reject(job.signal.reason);
+          job = this.queue.shift();
+        }
+        if (!job) return;
+        try {
+          if (!slot.client?.worker) slot.client = new CopcTileSource();
+          slot.busy = true;
+          slot.client.request("read", job.data, job.signal).then(job.resolve, job.reject).finally(() => {
+            slot.busy = false;
+            this.dispatch();
+          });
+        } catch (error) {
+          job.reject(error);
+        }
+      }
+    }
+
+    close() {
+      this.closed = true;
+      for (const { reject } of this.queue.splice(0)) reject(new Error("The COPC decoder pool is closed."));
+      for (const slot of this.slots) slot.client?.close();
+    }
+  }
+
   class VolatileTileStore {
     constructor({
       name = "pointscape-volatile-tiles",
@@ -445,6 +536,8 @@
   }
 
   globalScope.PointScapeDataIngestion = {
+    CopcDecodePool,
+    CopcTileSource,
     LasDataIngestionService,
     VolatileTileStore,
   };

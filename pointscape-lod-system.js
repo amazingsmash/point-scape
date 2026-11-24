@@ -24,6 +24,7 @@
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
       this.fullPointCounts = new Map();
+      this.voxelByTileId = new Map();
       this.visibilityByTileId = new Map();
       this.usedPointBudget = 0;
       this.remainingPointBudget = this.config.residentPointBudget || 500000;
@@ -34,19 +35,42 @@
       this.expandedTileIds = new Set();
       this.fullResolutionTileIds = new Set();
       this.fullPointCounts = new Map();
+      this.voxelByTileId = new Map();
       this.visibilityByTileId = new Map();
       this.usedPointBudget = 0;
       this.remainingPointBudget = this.config.residentPointBudget || 500000;
     }
 
-    selectActiveTiles(records, map) {
+    selectActiveTiles(records, map, { voxelEnabled = false, verticalScale = 1, offsetMeters = 0 } = {}) {
       const mapCenter = map?.getCenter?.();
       this.selectionNow = this.now();
       this.screenBounds = new Map();
       this.visibilityEvaluations = new Map();
       const useAccumulatedLod = this.getSummary()?.indexingMode === "m3no";
+      const voxels = globalScope.PointScapeVoxelImpostors;
+      const voxelDecisions = new Map();
+      const focalLength = this.getMapViewportHeightPixels(map) /
+        (2 * Math.tan(this.getMapVerticalFovRadians(map) / 2));
+      const getVoxelDecision = tile => {
+        if (!voxelEnabled || !voxels.canVoxelize(tile)) return null;
+        if (!voxelDecisions.has(tile.id)) {
+          const cellSize = voxels.getCellSizeMeters(tile);
+          const eye = this.getApproxCameraMetricPosition(map, mapCenter, tile);
+          const distances = voxels.getSwitchDistances(cellSize, focalLength,
+            this.config.voxelMaxPixels, verticalScale);
+          const distanceMeters = eye ? Math.hypot(
+            this.getPointToBoundsDistanceMeters(eye, tile.bounds) * voxels.horizontalScale(tile),
+            this.getPointToTileVerticalDistanceMeters(
+              { z: (eye.z - offsetMeters) / verticalScale }, tile) * verticalScale,
+          ) : Infinity;
+          const useVoxels = voxels.shouldUseVoxels(distanceMeters, distances,
+            this.voxelByTileId.get(tile.id)?.useVoxels);
+          voxelDecisions.set(tile.id, { cellSize, distanceMeters, useVoxels, ...distances });
+        }
+        return voxelDecisions.get(tile.id);
+      };
       const selectionResult = this.tileSelection.selectActiveTiles(records, {
-        useAccumulatedLod,
+        accumulatesChildren: tile => useAccumulatedLod || tile.format === "copc",
         pointBudget: this.config.residentPointBudget || 500000,
         getTilePointCost: (tile) => tile.sampledPointCount || 0,
         getFullPointCost: (tile) => tile.fullPointCount || 0,
@@ -57,7 +81,14 @@
         previousExpandedTileIds: this.expandedTileIds,
         swapHysteresis: this.config.lodSwapHysteresisRatio ?? 0.2,
         isTileVisible: (tile) => this.isTileLoadableInMap(tile, map, mapCenter),
-        shouldExpandTile: (tile) => this.shouldExpandTile(tile, map, mapCenter),
+        shouldExpandTile: tile => {
+          if (getVoxelDecision(tile)?.useVoxels) return false;
+          // Keep the first COPC level available at overview distances, until
+          // the projected root is too small to benefit from its children.
+          if (voxelEnabled && tile.format === "copc" && tile.depth === 0 &&
+            this.getStableVisibility(tile, map, mapCenter).metric >= 48) return true;
+          return this.shouldExpandTile(tile, map, mapCenter);
+        },
         getTilePriority: (tile) => this.getVisualPriority(tile, map, mapCenter),
       });
       const { activeTiles, nextExpandedTileIds, nextFullTileIds, nextFullPointCounts } = selectionResult;
@@ -68,6 +99,10 @@
       this.usedPointBudget = selectionResult.usedPointBudget;
       this.remainingPointBudget = selectionResult.remainingPointBudget;
       this.activeTileIds = new Set(activeTiles.map((tile) => tile.id));
+      this.voxelByTileId = new Map(activeTiles.flatMap(tile => {
+        const decision = getVoxelDecision(tile);
+        return decision ? [[tile.id, decision]] : [];
+      }));
 
       const recordIds = new Set(records.map(tile => tile.id));
       for (const tileId of this.visibilityByTileId.keys()) {

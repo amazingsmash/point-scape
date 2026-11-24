@@ -20,6 +20,15 @@ test("points behind the eye cannot be picked", () => {
   const matrix = [...identity]; matrix[15] = -1;
   assert.equal(pickPoint([tile("behind", 0, 0, 0)], matrix, 50, 50, 100, 100), null);
 });
+
+test("picking follows the animated exploded height", () => {
+  const buffer = tile("raised", 0, 0, 0);
+  buffer.explodedOffsetMercator = 2;
+  buffer.explodedProgress = 1;
+  assert.equal(pickPoint([buffer], identity, 50, 50, 100, 100), null);
+  buffer.explodedProgress = 0;
+  assert.equal(pickPoint([buffer], identity, 50, 50, 100, 100).id, "raised");
+});
 test("inspector preserves the full node extent and original metric proportions", () => {
   const record = { bounds: { minX: 100, maxX: 200, minY: 300, maxY: 500 }, minZ: 10, maxZ: 30, crsKind: "utm" };
   // Both points cluster in one corner. Framing must not shrink to that cluster.

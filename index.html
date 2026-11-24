@@ -220,6 +220,19 @@
                   <small>levels</small>
                 </label>
               </fieldset>
+              <fieldset class="lod-control-group" aria-label="COPC voxel impostors">
+                <legend>COPC voxel impostors</legend>
+                <label class="layer-option layer-option-toggle">
+                  <input type="checkbox" id="voxel-impostor-toggle" checked />
+                  <span>Use voxels for distant level-1 nodes</span>
+                </label>
+                <label class="camera-control" for="voxel-pixel-control">
+                  <span>Target projected voxel size</span>
+                  <output id="voxel-pixel-value" for="voxel-pixel-control">5 px</output>
+                  <input type="range" id="voxel-pixel-control" min="1" max="12" step="1" value="5" />
+                </label>
+                <small id="voxel-distance"></small>
+              </fieldset>
               <label class="camera-control" for="point-offset-control">
                 <span>Point cloud offset</span>
                 <output id="point-offset-value" for="point-offset-control">2 m</output>
@@ -274,6 +287,28 @@
           <details class="control-section">
             <summary>Visual effects</summary>
             <div class="control-section-body">
+              <fieldset class="lod-control-group" aria-label="Eye-Dome Lighting parameters">
+                <legend>Eye-Dome Lighting</legend>
+                <label class="layer-option layer-option-toggle">
+                  <input type="checkbox" id="edl-toggle" checked />
+                  <span>Enable depth shading</span>
+                </label>
+                <label class="camera-control" for="edl-strength-control">
+                  <span>Strength</span>
+                  <output id="edl-strength-value" for="edl-strength-control">1.0</output>
+                  <input type="range" id="edl-strength-control" min="0" max="5" step="0.1" value="1" />
+                </label>
+                <label class="camera-control" for="edl-radius-control">
+                  <span>Sample radius</span>
+                  <output id="edl-radius-value" for="edl-radius-control">2.0 px</output>
+                  <input type="range" id="edl-radius-control" min="0.5" max="8" step="0.5" value="2" />
+                </label>
+                <label class="camera-control" for="edl-neighbors-control">
+                  <span>Directions</span>
+                  <output id="edl-neighbors-value" for="edl-neighbors-control">8</output>
+                  <input type="range" id="edl-neighbors-control" min="4" max="16" step="4" value="8" />
+                </label>
+              </fieldset>
               <label class="camera-control" for="depth-bias-control">
                 <span>Depth advantage</span>
                 <output id="depth-bias-value" for="depth-bias-control">0.0100</output>
@@ -315,10 +350,16 @@
           </details>
 
           <label class="file-drop" id="las-drop" for="las-file">
-            <span>Load LAS files</span>
-            <small>Drop one or more .las files or click</small>
-            <input type="file" id="las-file" accept=".las" multiple />
+            <span>Load point clouds</span>
+            <small>Drop LAS or COPC (.laz) files here, or click to browse</small>
+            <input type="file" id="las-file" accept=".las,.laz,.copc" multiple />
           </label>
+          <button class="fly-button" id="copc-demo" type="button" disabled>
+            Load COPC demo · Autzen Stadium
+          </button>
+          <button class="fly-button" id="paris-demo" type="button" disabled>
+            Load COPC demo · Paris
+          </button>
           <button
             class="fly-button"
             id="fly-to-point-cloud"
@@ -327,7 +368,28 @@
           >
             Fly To Point Cloud
           </button>
-          <p class="file-status" id="las-status">No LAS point cloud loaded.</p>
+          <button
+            class="fly-button exploded-view-button"
+            id="exploded-view"
+            type="button"
+            aria-pressed="false"
+            disabled
+          >
+            Exploded View
+          </button>
+          <label class="camera-control" for="exploded-decimation-control">
+            <span>Exploded View points</span>
+            <output id="exploded-decimation-value" for="exploded-decimation-control">10%</output>
+            <input
+              type="range"
+              id="exploded-decimation-control"
+              min="1"
+              max="100"
+              step="1"
+              value="10"
+            />
+          </label>
+          <p class="file-status" id="las-status" role="status">No point cloud loaded.</p>
         </div>
       </section>
 
@@ -345,13 +407,16 @@
       <div class="js-console-output" id="js-console-output" role="region" aria-label="Mensajes de consola" tabindex="0"></div>
     </section>
     <script src="./js-console.js?v=1"></script>
-    <script src="./tile-selection.js?v=3"></script>
-    <script src="./pointscape-lod-streaming.js?v=1"></script>
-    <script src="./pointscape-data-ingestion.js?v=2"></script>
-    <script src="./pointscape-lod-system.js?v=3"></script>
+    <script src="./tile-selection.js?v=4"></script>
+    <script src="./pointscape-lod-streaming.js?v=6"></script>
+    <script src="./pointscape-copc-reader.js?v=4"></script>
+    <script src="./pointscape-voxel-impostors.js?v=1"></script>
+    <script src="./pointscape-data-ingestion.js?v=4"></script>
+    <script src="./pointscape-lod-system.js?v=5"></script>
     <script src="./pointscape-point-sizing.js?v=1"></script>
-    <script src="./pointscape-ui-controller.js?v=3"></script>
+    <script src="./pointscape-exploded-view.js?v=1"></script>
+    <script src="./pointscape-ui-controller.js?v=7"></script>
     <script src="./node-inspector.js?v=4"></script>
-    <script src="./script.js?v=53"></script>
+    <script src="./script.js?v=61"></script>
   </body>
 </html>

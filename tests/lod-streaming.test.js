@@ -70,6 +70,37 @@ test('new camera discards obsolete in-flight detail and releases old cache', asy
   assert.equal(s.streamer.cache.has('a:sample'), false);
 });
 
+test('parallel reads respect priority and cancel the obsolete child without blocking its replacement', async () => {
+  const records = [
+    tile('r', null, ['a', 'b', 'c'], 10),
+    tile('a', 'r', [], 20, 90), tile('b', 'r', [], 20, 70), tile('c', 'r', [], 20, 20),
+  ].map(node => ({ ...node, format: 'copc' }));
+  const pending = new Map();
+  const read = (id, _source, signal) => new Promise((resolve, reject) => {
+    pending.set(id, { resolve, signal });
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  const streamer = new LodStreamer({ read, select: selectActiveTiles, publish: () => {} });
+  const plan = activeTiles => ({ records, activeTiles, fullIds: new Set(), expandedIds: new Set(['r']),
+    accumulated: true, budget: 70, priority: item => item.priority, readConcurrency: 2 });
+  const advance = () => new Promise(resolve => setImmediate(resolve));
+  const readAll = streamer.update(plan(records));
+  assert.deepEqual([...pending.keys()], ['r']);
+  pending.get('r').resolve({ points: { test: true } });
+  await advance();
+  assert.deepEqual([...streamer.inFlight.keys()], ['a:sample', 'b:sample']);
+
+  streamer.update(plan([records[0], records[2], records[3]]));
+  await advance();
+  assert.equal(pending.get('a').signal.aborted, true);
+  assert.deepEqual([...streamer.inFlight.keys()], ['b:sample', 'c:sample']);
+  pending.get('c').resolve({ points: { test: true } });
+  pending.get('b').resolve({ points: { test: true } });
+  await readAll;
+  assert.deepEqual(streamer.displayed.map(item => item.id), ['r', 'b', 'c']);
+  assert.equal(streamer.cache.has('a:sample'), false);
+});
+
 test('M3NO publishes each ready child without waiting for the entire batch', async () => {
   const s = setup(true);
   const completion = s.streamer.update(s.plan);

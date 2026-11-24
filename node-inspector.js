@@ -19,7 +19,8 @@
     for (const tile of buffers || []) {
       const data = tile.pickPositions;
       if (!data) continue;
-      const a = tile.anchorMercator;
+      const a = [tile.anchorMercator[0], tile.anchorMercator[1],
+        tile.anchorMercator[2] + (tile.explodedOffsetMercator || 0) * (tile.explodedProgress || 0)];
       const anchor = [0, 1, 2, 3].map((row) => matrix[row] * a[0] + matrix[row + 4] * a[1] + matrix[row + 8] * a[2] + matrix[row + 12]);
       for (let index = 0; index < tile.pointCount; index += 1) {
         const offset = index * 4;
