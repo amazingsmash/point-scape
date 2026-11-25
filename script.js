@@ -504,6 +504,7 @@ function initMap() {
     getRecord: (id) => getStoredTileRecord(id),
     project: (lng, lat, tile) => pointscapeLodSystem.projectLngLatToTileMetric(lng, lat, tile),
     getPointSize: () => getPointMaximumRadiusPixels() * 2,
+    getClassColor: getLasClassColor,
     getLodDiagnostics: (tile) => pointscapeLodSystem.getTileLodDiagnostics(
       tile,
       window.mapLibreMap,

@@ -157,6 +157,13 @@ hysteresis, point costs, used/remaining global budget, hierarchy, and camera pos
 
 Only one stored node is fetched; closing releases its data and WebGL resources.
 
+Choose **Ver texturas del nodo** from the same point menu to generate and compare
+the selected node's 1024 × 1024 classification color and depth textures. Both use
+the same orthographic view aligned with the map camera at selection. Depth is
+linear in metres from the near plane, and empty texels are transparent in both
+previews. To select with the keyboard, focus the map, position a point at the
+center, press Enter, then use Tab to choose the texture option.
+
 ```text
 .
 |-- index.html               # Interface structure

@@ -81,6 +81,82 @@
       radius: Math.max(1, Math.hypot(...dimensions) / 2), count };
   }
 
+  const textureSize = 1024;
+
+  function createImpostorTextures(geometry, points, colorForClass, { bearing, pitch }) {
+    const heading = bearing * Math.PI / 180;
+    const tilt = pitch * Math.PI / 180;
+    const east = Math.sin(heading), north = Math.cos(heading);
+    const right = [north, -east, 0];
+    const up = [east * Math.cos(tilt), north * Math.cos(tilt), Math.sin(tilt)];
+    const towardCamera = [-east * Math.sin(tilt), -north * Math.sin(tilt), Math.cos(tilt)];
+    const project = (axis, x, y, z) => axis[0] * x + axis[1] * y + axis[2] * z;
+    const extent = (axis) => axis.reduce((sum, component, index) =>
+      sum + Math.abs(component) * geometry.dimensions[index] / 2, 0);
+    let halfSize = Math.max(extent(right), extent(up), 0.01);
+    let nearPlane = extent(towardCamera);
+    let farPlane = -nearPlane;
+    const { positions } = geometry;
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+      halfSize = Math.max(halfSize, Math.abs(project(right, x, y, z)), Math.abs(project(up, x, y, z)));
+      const viewZ = project(towardCamera, x, y, z);
+      nearPlane = Math.max(nearPlane, viewZ);
+      farPlane = Math.min(farPlane, viewZ);
+    }
+    // Two texels of padding preserve the point footprint at the edges.
+    const metersPerTexel = 2 * halfSize / (textureSize - 4);
+    const color = new Uint8ClampedArray(textureSize * textureSize * 4);
+    // Linear distance in metres from the near plane. Infinity marks empty texels.
+    const depth = new Float32Array(textureSize * textureSize).fill(Infinity);
+    const palette = new Map();
+    for (let i = 0; i < geometry.count; i += 1) {
+      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+      const column = Math.floor(textureSize / 2 + project(right, x, y, z) / metersPerTexel - 0.5);
+      const row = Math.floor(textureSize / 2 - project(up, x, y, z) / metersPerTexel - 0.5);
+      const distance = Math.fround(nearPlane - project(towardCamera, x, y, z));
+      const classification = points.classifications?.[i] ?? points[i]?.classification ?? 0;
+      if (!palette.has(classification)) {
+        const [r, g, b] = colorForClass(classification);
+        palette.set(classification, [r * 255, g * 255, b * 255, 255]);
+      }
+      const rgba = palette.get(classification);
+      for (let dy = 0; dy < 2; dy += 1) {
+        for (let dx = 0; dx < 2; dx += 1) {
+          const pixel = (row + dy) * textureSize + column + dx;
+          if (distance >= depth[pixel]) continue;
+          depth[pixel] = distance;
+          color.set(rgba, pixel * 4);
+        }
+      }
+    }
+    return { width: textureSize, height: textureSize, color, depth, right, up, towardCamera,
+      metersPerTexel, nearPlane, farPlane };
+  }
+
+  function paintTexturePreviews(dialog, textures) {
+    const { width, height, color, depth } = textures;
+    let nearest = Infinity, farthest = 0;
+    for (const value of depth) {
+      if (!Number.isFinite(value)) continue;
+      nearest = Math.min(nearest, value);
+      farthest = Math.max(farthest, value);
+    }
+    const grayscale = new Uint8ClampedArray(color.length);
+    const range = farthest - nearest || 1;
+    for (let i = 0; i < depth.length; i += 1) {
+      if (!Number.isFinite(depth[i])) continue;
+      const index = i * 4;
+      const shade = 255 * (1 - (depth[i] - nearest) / range);
+      grayscale[index] = grayscale[index + 1] = grayscale[index + 2] = shade;
+      grayscale[index + 3] = 255;
+    }
+    dialog.querySelector('[data-texture="color"]').getContext("2d")
+      .putImageData(new ImageData(color, width, height), 0, 0);
+    dialog.querySelector('[data-texture="depth"]').getContext("2d")
+      .putImageData(new ImageData(grayscale, width, height), 0, 0);
+  }
+
   function formatDiagnosticNumber(value, digits = 2) {
     if (value === Infinity) return "∞";
     if (!Number.isFinite(value)) return "—";
@@ -190,13 +266,21 @@
       this.menu = document.createElement("div");
       this.menu.className = "node-inspector-menu";
       this.menu.hidden = true;
-      this.menu.innerHTML = '<span></span><button type="button">Inspeccionar nodo en 3D</button>';
+      this.menu.innerHTML = `<span></span><button type="button" data-action="inspect">Inspeccionar nodo en 3D</button>
+        <button type="button" data-action="textures">Ver texturas del nodo</button>`;
       document.body.appendChild(this.menu);
-      this.menu.querySelector("button").onclick = () => this.open();
+      this.menu.querySelector('[data-action="inspect"]').onclick = () => this.open();
+      this.menu.querySelector('[data-action="textures"]').onclick = () => this.openTextures();
       const canvas = this.map.getCanvas();
       canvas.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         this.select(event.clientX, event.clientY);
+      });
+      canvas.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        this.select(rect.left + rect.width / 2, rect.top + rect.height / 2);
       });
       // A left click/tap also supports the initial requested gesture and iPad.
       this.map.on("click", (event) => {
@@ -209,7 +293,9 @@
         if (!this.menu.contains(event.target)) this.menu.hidden = true;
       });
       document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") this.menu.hidden = true;
+        if (event.key !== "Escape" || this.menu.hidden) return;
+        this.menu.hidden = true;
+        if (this.menu.contains(document.activeElement)) canvas.focus({ preventScroll: true });
       });
     }
     select(clientX, clientY) {
@@ -222,25 +308,56 @@
       const tile = layer.tiles.find((tile) => tile.id === hit.id);
       const point = pointAt(tile?.points, hit.index);
       if (!point || !this.getMetadata(hit.id)) return;
-      this.selection = { ...hit, point, source: hit.renderKey.includes(":full:") ? "full" : "sample" };
+      this.selection = { ...hit, point, source: hit.renderKey.includes(":full:") ? "full" : "sample",
+        bearing: this.map.getBearing(), pitch: this.map.getPitch() };
       this.menu.querySelector("span").textContent = `Nodo ${hit.id}`;
       this.menu.hidden = false;
       this.menu.style.left = `${Math.max(8, Math.min(clientX, innerWidth - this.menu.offsetWidth - 8))}px`;
       this.menu.style.top = `${Math.max(8, Math.min(clientY, innerHeight - this.menu.offsetHeight - 8))}px`;
       this.menu.querySelector("button").focus({ preventScroll: true });
     }
-    async open() {
-      if (!this.selection) return;
+    showDialog(title, contents) {
       this.close();
-      const generation = ++this.generation;
-      const selection = { ...this.selection };
       this.menu.hidden = true;
       const dialog = document.createElement("dialog");
       this.dialog = dialog;
       dialog.className = "node-inspector-dialog";
       dialog.setAttribute("aria-labelledby", "node-inspector-title");
-      dialog.innerHTML = `
-        <header><div><h2 id="node-inspector-title">Inspector de nodo 3D</h2><p class="node-inspector-info" role="status">Cargando nodo…</p></div><button type="button" data-action="close">Cerrar</button></header>
+      dialog.innerHTML = `<header><div><h2 id="node-inspector-title">${title}</h2><p class="node-inspector-info" role="status">Cargando nodo…</p></div><button type="button" data-action="close">Cerrar</button></header>${contents}`;
+      document.body.appendChild(dialog);
+      dialog.addEventListener("cancel", (event) => { event.preventDefault(); this.close(); });
+      dialog.querySelector('[data-action="close"]').onclick = () => this.close();
+      dialog.showModal();
+      return dialog;
+    }
+    async openTextures() {
+      const selection = this.selection;
+      if (!selection) return;
+      const dialog = this.showDialog("Texturas del nodo", `
+        <div class="node-inspector-textures" hidden>
+          <figure><figcaption>Color por clasificación</figcaption>
+            <canvas data-texture="color" width="${textureSize}" height="${textureSize}" role="img" aria-label="Textura de color"></canvas></figure>
+          <figure><figcaption>Profundidad <span>Blanco cerca · negro lejos</span></figcaption>
+            <canvas data-texture="depth" width="${textureSize}" height="${textureSize}" role="img" aria-label="Textura de profundidad"></canvas></figure>
+        </div>`);
+      const generation = this.generation;
+      try {
+        const record = await this.getRecord(selection.id);
+        if (generation !== this.generation) return;
+        if (!record) throw new Error("El nodo ya no está disponible. Selecciona un punto de la nube actual.");
+        const points = (selection.source === "full" ? record.fullPoints : record.points) || record.fullPoints || record.points;
+        const geometry = createGeometry(record, points, this.project);
+        const textures = createImpostorTextures(geometry, points, this.getClassColor, selection);
+        paintTexturePreviews(dialog, textures);
+        dialog.querySelector(".node-inspector-textures").hidden = false;
+        dialog.querySelector(".node-inspector-info").textContent =
+          `${record.fileName} · Nodo ${record.id} · ${geometry.count.toLocaleString("es-ES")} puntos · ${textureSize} × ${textureSize} px por textura`;
+      } catch (error) { if (generation === this.generation) this.showError(error); }
+    }
+    async open() {
+      const selection = this.selection;
+      if (!selection) return;
+      const dialog = this.showDialog("Inspector de nodo 3D", `
         <div class="node-inspector-tools">
           <label>Datos <select aria-label="Puntos del nodo" disabled><option value="sample">Muestra del nodo</option><option value="full">Todos los puntos de la hoja</option></select></label>
           <label>Tamaño <input aria-label="Tamaño de puntos del inspector" type="range" min="1" max="5" step="0.5" value="2"></label>
@@ -253,11 +370,8 @@
             <h3>Diagnóstico LOD</h3><div class="node-inspector-lod">Calculando…</div>
           </aside>
         </div>
-        <p class="node-inspector-help">Arrastra para girar · rueda o pellizco para zoom · flechas para girar · +/− para zoom<br>Proyección ortográfica · caja del nodo en gris · punto seleccionado en amarillo · XYZ a la misma escala, sin exageración del terreno</p>`;
-      document.body.appendChild(dialog);
-      dialog.addEventListener("cancel", (event) => { event.preventDefault(); this.close(); });
-      dialog.querySelector('[data-action="close"]').onclick = () => this.close();
-      dialog.showModal();
+        <p class="node-inspector-help">Arrastra para girar · rueda o pellizco para zoom · flechas para girar · +/− para zoom<br>Proyección ortográfica · caja del nodo en gris · punto seleccionado en amarillo · XYZ a la misma escala, sin exageración del terreno</p>`);
+      const generation = this.generation;
       try {
         const record = await this.getRecord(selection.id);
         if (generation !== this.generation) return;
@@ -438,7 +552,7 @@
       this.gl.getExtension("WEBGL_lose_context")?.loseContext();
     }
   }
-  const api = { Controller, pickPoint, createGeometry, createLodDiagnosticGroups };
+  const api = { Controller, pickPoint, createGeometry, createImpostorTextures, createLodDiagnosticGroups };
   scope.PointScapeNodeInspector = api;
   if (typeof module !== "undefined") module.exports = api;
 })(globalThis);

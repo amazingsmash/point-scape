@@ -115,12 +115,32 @@
 }
 .node-inspector-dialog :focus-visible, .node-inspector-menu :focus-visible { outline: 2px solid #80c9ff; outline-offset: -2px; }
 .node-inspector-help { margin: 0; padding: 8px 16px; color: #aebbd0; font-size: 12px; background: #101722; }
+.node-inspector-textures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  overflow: auto;
+  padding: 16px;
+}
+.node-inspector-textures[hidden] { display: none; }
+.node-inspector-textures figure { margin: 0; min-width: 0; }
+.node-inspector-textures figcaption { margin-bottom: 8px; font-weight: 600; }
+.node-inspector-textures figcaption span { margin-left: 6px; color: #aebbd0; font-size: 12px; font-weight: 400; }
+.node-inspector-textures canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: repeating-conic-gradient(#17202c 0% 25%, #222e3d 0% 50%) 50% / 18px 18px;
+  border: 1px solid #334458;
+  box-sizing: border-box;
+}
 @media (max-width: 600px) {
   .node-inspector-dialog { width: 100vw; height: 100dvh; border-radius: 0; }
   .node-inspector-dialog header { padding: 8px; }
   .node-inspector-tools { gap: 6px; padding: 6px 8px; }
   .node-inspector-tools select { max-width: 210px; }
   .node-inspector-info { font-size: 12px; }
+  .node-inspector-textures { grid-template-columns: minmax(0, 1fr); padding: 10px; }
 }
 @media (max-width: 850px) {
   .node-inspector-main { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) minmax(160px, 34vh); }

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { pickPoint, createGeometry, createLodDiagnosticGroups } = require("../node-inspector.js");
+const { pickPoint, createGeometry, createImpostorTextures, createLodDiagnosticGroups } = require("../node-inspector.js");
 const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const tile = (id, x, y, z, anchor = [0, 0, 0]) => ({ id, renderKey: `${id}:sample:1`,
   pointCount: 1, anchorMercator: anchor, pickPositions: new Float32Array([x, y, z, 0]) });
@@ -44,6 +44,35 @@ test("inspector preserves the full node extent and original metric proportions",
     assert.ok(Math.abs(geometry.grid[i + 2]) <= 10);
   }
   assert.deepEqual(geometry.toLocal({ lng: 150, lat: 400, altitudeMeters: 20 }), [0, 0, 0]);
+});
+
+test("impostor texture color and linear depth come from the same frontmost point", () => {
+  const geometry = { dimensions: [10, 10, 10], count: 2,
+    positions: new Float32Array([0, 0, 4, 0, 0, -2]) };
+  const points = { classifications: new Uint8Array([2, 3]) };
+  const textures = createImpostorTextures(geometry, points,
+    (classification) => classification === 2 ? [0, 1, 0] : [1, 0, 0], { bearing: 0, pitch: 0 });
+  assert.equal(textures.width, 1024);
+  assert.equal(textures.height, 1024);
+  assert.equal(textures.depth.length, 1024 * 1024);
+  assert.equal(textures.color.length, textures.depth.length * 4);
+  assert.equal(textures.depth[0], Infinity);
+  assert.equal(textures.color[3], 0);
+  const center = 512 * 1024 + 512;
+  assert.equal(textures.depth[center], 1);
+  assert.deepEqual([...textures.color.slice(center * 4, center * 4 + 4)], [0, 255, 0, 255]);
+});
+
+test("impostor follows camera orientation and keeps the node extent in the texture", () => {
+  const geometry = { dimensions: [10, 10, 10], count: 2,
+    positions: new Float32Array([4, 5, 5, -4, 5, 5]) };
+  const points = [{ classification: 2 }, { classification: 3 }];
+  const textures = createImpostorTextures(geometry, points,
+    (classification) => classification === 2 ? [0, 1, 0] : [1, 0, 0], { bearing: 90, pitch: 90 });
+  const edge = 2 * 1024 + 2;
+  assert.equal(textures.depth[edge], 1);
+  assert.deepEqual([...textures.color.slice(edge * 4, edge * 4 + 4)], [255, 0, 0, 255]);
+  assert.equal(textures.depth[512 * 1024 + 512], Infinity);
 });
 
 test("LOD diagnostic rows expose the final decision, projection, thresholds and budget", () => {
