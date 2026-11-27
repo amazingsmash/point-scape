@@ -20,7 +20,9 @@ Repository: <https://github.com/amazingsmash/point-scape>
 - Local loading of LAS and COPC, with automatic format detection for COPC files.
 - Direct reuse of the COPC octree and on-demand LAZ chunk decoding.
 - Progressive COPC hierarchy loading, with prioritized parallel decoding.
-- Optional voxel impostors for distant COPC children of the root.
+- Optional voxel impostors for distant COPC children of the root and color/depth image impostors for the map.
+- Interactive camera-probe octree for COPC, with offscreen cubemaps, per-face
+  SSIM, and live 3D inspection of the selected nodes.
 - WebGL visualization of points over the map.
 - Coloring by LAS classification.
 - Eye-Dome Lighting (EDL) depth shading with live strength, sample radius,
@@ -42,7 +44,7 @@ Repository: <https://github.com/amazingsmash/point-scape>
 ## Requirements
 
 - Node.js.
-- A modern browser with WebGL support.
+- A modern browser with WebGL support. The camera-probe mode and image impostors require WebGL 2.
 - Internet access for external libraries and map tiles.
 
 There are no npm dependencies to install in this repository. The local server uses built-in Node.js modules, while the viewer libraries are loaded from CDNs.
@@ -81,13 +83,53 @@ On Windows, the repository also includes `lanzar.cmd` and `lanzar.ps1` as conven
 
 Local point cloud files stay in the browser. For COPC, PointScape reads the embedded hierarchy and decompresses individual nodes as the view needs them. COPC on the map requires a horizontal coordinate system declared in WKT and supported by Proj4.
 
+### Octree de probes de cámara
+
+Con el visor abierto en [localhost](http://127.0.0.1:5173/), carga una nube COPC y selecciona **PointScape → Octree de probes**. La vista usa una cámara independiente. Arrastra para orbitar, mantén Mayús para desplazar y usa la rueda para acercar. Puedes ocultar **Superposiciones** para inspeccionar la nube sobre negro.
+
+**Iniciar** ejecuta el precálculo y **Paso** avanza una etapa o una comparación. Con **Pausar al subdividir** activo, el visor se detiene en la cara con el peor SSIM y muestra las ocho subceldas. Selecciona una caja, un marcador o sus entradas en el panel para volver a un resultado. Pulsa una cara para fijarla y ver las imágenes alineadas. **Seguir cálculo** vuelve al probe activo. El panel identifica las capturas compartidas y las muestras heredadas.
+
+Cada celda evalúa su centro, los seis centros de cara y los probes del padre ya
+capturados que contiene. Cada probe genera seis imágenes cuadradas en perspectiva
+de 90° sobre un framebuffer WebGL con búferes de color y profundidad. Las
+capturas comparten el estilo de puntos y dejan libre la cámara de órbita.
+
+El precálculo carga todos los bloques COPC de referencia si caben en el presupuesto
+de puntos, de 4 millones por defecto y ajustable hasta 12 millones. Desde el
+probe central parte de los nodos raíz y compara refinamientos COPC sucesivos.
+El ajuste **Niveles antes de podar** controla cuántos niveles consecutivos se
+prueban antes de descartar una rama. A continuación, cada probe compara esa
+selección común con la referencia completa desde su propia posición. El SSIM se
+mide en luminancia con ventanas locales de 7 × 7 píxeles que tocan geometría en
+alguna de las dos imágenes. La peor cara con contenido determina si la selección
+alcanza el umbral. La celda se subdivide si falla esa comparación o supera el
+lado máximo configurado.
+
+**Impostor de imagen** usa el tamaño de textura configurado en el visor y
+reproyecta el mismo impostor de cada nodo para todas las poses. Las celdas que
+quedan por resolver al alcanzar un límite conservan el LOD habitual de COPC.
+La interfaz muestra el motivo y el consumo del presupuesto de caras.
+
+Al terminar el cálculo, pulsa un marcador o elige un **Probe** para ver la nube en 3D desde esa posición. Las seis caras cambian la dirección de la cámara. Si la celda está resuelta, el visor activa su selección guardada e indica cuántos nodos son visibles. En una celda pendiente se aplica el LOD habitual. Usa **Volver a órbita** para recuperar la vista de conjunto.
+
+**Medir interior y diagonal** compara la selección guardada desde cinco posiciones de una diagonal y dos posiciones interiores adicionales. La medición usa el presupuesto de caras restante y muestra el peor SSIM de las posiciones reservadas.
+
+Para comprobar el flujo, abre [probe-simple.copc.laz](tests/fixtures/probe-simple.copc.laz) con los ajustes iniciales. La raíz debe resolverse en 42 caras y la verificación interior debe dar SSIM 1.0000. Para [probe-aperture.copc.laz](tests/fixtures/probe-aperture.copc.laz), usa 64 px, profundidad 1, presupuesto de 950 caras y umbral 0.98. La raíz debe subdividirse y pausar. Inspecciona la cara señalada y abre una subcelda antes de reanudar. Con un presupuesto de dos caras, puedes comprobar cómo la raíz vuelve a quedar pendiente.
+
+Para probar una extensión mayor, descarga la tesela de Georgetown, Washington
+D. C. Cubre unos 817 × 817 m y contiene 5.405.613 puntos. La sesión verificada
+usó 64 px, umbral 0.95, profundidad 1, 1.000 caras y un presupuesto de referencia
+de 6 millones de puntos. La raíz se subdividió al fallar la cara −Z del probe +X.
+Las subceldas quedaron pendientes por profundidad o presupuesto al terminar
+el cálculo. [Tesela COPC de NOAA](https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/laz/geoid18/9837/block_1/20220124_1717.copc.laz) · [Datos de DC OCTO distribuidos por NOAA](https://www.fisheries.noaa.gov/inport/item/69938)
+
 ### COPC demo
 
 Click **Load COPC demo · Autzen Stadium** or open [the local COPC demo](http://127.0.0.1:5173/?demo=copc). PointScape opens the public Autzen Stadium cloud through HTTP byte ranges and moves the camera to its location. Zoom in to see the existing octree supply more detailed nodes. The source file contains 10,653,336 points. [COPC example data](https://copc.io/#example-data)
 
 ### COPC voxel impostors
 
-In **Point cloud → COPC voxel impostors**, toggle the experiment or adjust the
+In **Point cloud → Impostors**, select **Voxels** or adjust the
 target projected voxel size. At the default of 5 pixels, each visible level-1
 node uses an occupied voxel grid once its estimated cell size reaches that
 screen size. The viewer switches back to points below 80% of the entry
@@ -103,6 +145,46 @@ points. [IGN LiDAR HD](https://geoservices.ign.fr/lidarhd)
 The [local Millsite demo](http://127.0.0.1:5173/?demo=millsite) opens the
 374,609,447-point USGS sample for comparison. All demos read HTTP byte ranges
 on demand. [Millsite COPC](https://s3.amazonaws.com/hobu-lidar/millsite.copc.laz)
+
+### Color and depth impostors
+
+Choose **Color + depth images** under **Point cloud → Impostors**. Set a square
+**Texture resolution** and a **Max projected area multiplier**. A node is eligible
+when its projected bounding rectangle, clipped to the viewport in framebuffer
+pixels, has area at most `multiplier × resolution²`. The defaults are 1024 × 1024
+and 1×. **Camera movement for reuse** sets the permitted 3D displacement as a
+percentage of the camera-to-node-center distance at capture time (15% by default).
+
+Each texture pair stores the closest point's classification color and
+projected depth, along with the cropped perspective camera matrix. WebGL 2
+unprojects occupied texels with that matrix and projects the result into the
+live camera. Nodes draw as points while an invalidated capture is regenerated
+after movement stops. The viewer bounds GPU memory to eight pairs and prioritizes
+the nodes with the most points when more are eligible.
+
+When PointScape runs on localhost, **Temporary cache folder** shows the full
+path of the viewer session. The Node server creates it under `os.tmpdir()` on
+macOS and Windows. Each saved capture contains `color.png`, `depth.png`, and
+`camera.json`. Depth PNG channels hold the four little-endian bytes of each
+Float32 depth sample, with infinity for empty texels. The JSON contains the
+capture and inverse matrices, the original view-projection matrix, the node
+anchor, and the camera position in normalized Mercator coordinates.
+
+The viewer can reload a capture from disk when the node data, texture size,
+palette, and camera reuse radius match. The cache keeps up to three viewpoints
+per matching node and uses at most 256 MiB per session. The server removes the
+session folder 45 seconds after its last viewer disconnects.
+
+For images, the viewer times each node's last actual points draw as it switches
+to an impostor. **Measure render time** refreshes the timings for the visible
+images and compares them with those stored point timings, even if the camera
+has moved. The aggregate difference sums the nodes with both samples. Image
+timing uses WebGL GPU queries on the node's draw calls, including the depth and
+color passes.
+
+For voxels, stop the camera and use **Measure render time** for an offscreen
+comparison with the same nodes drawn as points. It reports the median of eight
+paired runs. Its synchronized fallback estimates CPU submission plus GPU time.
 
 ### COPC loading performance
 
@@ -158,11 +240,11 @@ hysteresis, point costs, used/remaining global budget, hierarchy, and camera pos
 Only one stored node is fetched; closing releases its data and WebGL resources.
 
 Choose **Ver texturas del nodo** from the same point menu to generate and compare
-the selected node's 1024 × 1024 classification color and depth textures. Both use
-the same orthographic view aligned with the map camera at selection. Depth is
-linear in metres from the near plane, and empty texels are transparent in both
-previews. To select with the keyboard, focus the map, position a point at the
-center, press Enter, then use Tab to choose the texture option.
+the selected node's classification color and depth textures at the configured resolution. The
+previews use the active capture camera when the node is drawn as an image
+impostor, or the map camera at selection for a new capture. Empty texels are
+transparent. To select with the keyboard, focus the map, position a point at
+the center, press Enter, then use Tab to choose the texture option.
 
 ```text
 .
@@ -173,6 +255,14 @@ center, press Enter, then use Tab to choose the texture option.
 |-- pointscape-data-ingestion.js    # LAS worker orchestration and volatile tile storage
 |-- pointscape-octree-builder.js    # QuadTree/M3NO construction used by the worker
 |-- pointscape-lod-system.js        # Active node selection and LOD state
+|-- pointscape-image-impostors.js   # Color/depth capture, residency, and GPU timing
+|-- pointscape-impostor-disk.js     # Browser client for the localhost cache
+|-- impostor-disk-cache.js          # Temporary texture storage on the Node server
+|-- pointscape-probe-octree.js      # Camera cells, probes, COPC refinement, and decisions
+|-- pointscape-probe-mode.js        # Orbit, stepping, result history, and probe views
+|-- pointscape-probe-renderer.js    # Isolated WebGL view and offscreen cubemap capture
+|-- pointscape-probe-ssim.js        # Local SSIM and error map worker
+|-- pointscape-probes.css           # Isolated view and probe panel
 |-- tile-selection.js        # Pure tile traversal and camera-culling helpers
 |-- las-index.worker.js      # Thin worker transport for LAS indexing/processing
 |-- ARCHITECTURE.md          # Living architecture notes for ongoing refactors
@@ -218,7 +308,10 @@ The application uses a volatile IndexedDB database (`pointscape-volatile-tiles`)
 
 ## Data and Privacy
 
-PointScape is designed to work with local LAS files. The browser reads the files selected by the user and processes them on the user's machine.
+PointScape processes local LAS and COPC files on the user's machine. When the
+local Node server is available, the map can send image-impostor captures to its
+temporary localhost cache. Probe results and cubemap comparisons stay in memory
+for the current run.
 
 The application does request external resources for:
 
@@ -280,7 +373,7 @@ progress, and the peak accounted I/O buffer bytes; this counter excludes JavaScr
 objects, browser internals, map textures, and GPU allocations. Temporary partitions
 are cleared after completion and at the next load after a page crash.
 
-- LAS files are supported; compressed LAZ files are not currently supported.
+- Supported inputs include uncompressed LAS and LAZ files organized as COPC.
 - Performance depends on point-cloud size, available memory, and the user's GPU.
 - Some resources require Internet access.
 - CRS definitions may depend on remote sources when reprojection is needed.
@@ -297,23 +390,30 @@ The project does not use a bundler or frontend framework. To modify it:
 - Edit `pointscape-data-ingestion.js` for LAS ingestion or temporary tile storage.
 - Edit `pointscape-octree-builder.js` for QuadTree/M3NO indexing logic.
 - Edit `pointscape-lod-system.js` for active node selection and LOD policy.
+- Edit `pointscape-probe-octree.js` for probe refinement and subdivision decisions.
+- Edit `pointscape-probe-mode.js` and `pointscape-probes.css` for probe controls and inspection.
 - Edit `las-index.worker.js` only for worker message transport.
 
-After touching JavaScript, a useful quick check is:
+Run the Node test suite after changes.
 
 ```bash
-node --check script.js
+npm test
 ```
+
+The suite includes COPC ingestion and streaming, image-impostor capture and
+disk caching, local SSIM, probe reuse, subdivision, and validation along a
+reserved diagonal.
 
 ## Possible Future Improvements
 
-- LAZ support.
+- Support for compressed LAZ files outside COPC.
+- On-demand COPC refinement from 15 positions per camera cell, including the
+  eight corners. See the [proposed probe algorithm](ARCHITECTURE.md#proposed-per-probe-refinement).
 - Local packaging of libraries and assets for offline use.
 - Optional persistence of indexes between sessions.
 - Exportable loading statistics.
 - More symbology controls for LAS classifications.
 - Configurable cartographic sources.
-- Automated tests for parsing, indexing, and tile selection.
 
 ## License
 

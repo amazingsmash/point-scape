@@ -276,7 +276,7 @@
     }
     return {
       metadata: { fileIndex, crs, crsLabel: crs.label, sourcePointCount: header.pointCount,
-        validPointCount: header.pointCount, tiles: [...tiles.values()], decodeInfo: { header, wkt } },
+        validPointCount: header.pointCount, pointBounds: projectBounds([...header.min, ...header.max], [0, 0, 0, 0], transform, zScale).bounds, tiles: [...tiles.values()], decodeInfo: { header, wkt } },
       loadHierarchy,
       loadAllHierarchy,
       async readTile(id, getDecoder) {

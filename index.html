@@ -17,6 +17,7 @@
     />
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./node-inspector.css?v=4" />
+    <link rel="stylesheet" href="./pointscape-probes.css?v=2" />
   </head>
   <body>
     <section
@@ -220,18 +221,57 @@
                   <small>levels</small>
                 </label>
               </fieldset>
-              <fieldset class="lod-control-group" aria-label="COPC voxel impostors">
-                <legend>COPC voxel impostors</legend>
+              <fieldset class="lod-control-group">
+                <legend>Impostors</legend>
+                <label class="camera-control" for="impostor-mode">
+                  <span>Impostor type</span>
+                  <select id="impostor-mode">
+                    <option value="none">Points only</option>
+                    <option value="voxel" selected>Voxels</option>
+                    <option value="image">Color + depth images</option>
+                  </select>
+                </label>
                 <label class="layer-option layer-option-toggle">
-                  <input type="checkbox" id="voxel-impostor-toggle" checked />
-                  <span>Use voxels for distant level-1 nodes</span>
+                  <input type="checkbox" id="impostor-debug-toggle" />
+                  <span>Debug: highlight impostors in green</span>
                 </label>
-                <label class="camera-control" for="voxel-pixel-control">
-                  <span>Target projected voxel size</span>
-                  <output id="voxel-pixel-value" for="voxel-pixel-control">5 px</output>
-                  <input type="range" id="voxel-pixel-control" min="1" max="12" step="1" value="5" />
-                </label>
-                <small id="voxel-distance"></small>
+                <div class="impostor-controls" id="voxel-impostor-controls">
+                  <label class="camera-control" for="voxel-pixel-control">
+                    <span>Target projected voxel size</span>
+                    <output id="voxel-pixel-value" for="voxel-pixel-control">5 px</output>
+                    <input type="range" id="voxel-pixel-control" min="1" max="12" step="1" value="5" />
+                  </label>
+                  <small id="voxel-distance"></small>
+                </div>
+                <div class="impostor-controls" id="image-impostor-controls" hidden>
+                  <label class="camera-control" for="image-impostor-size">
+                    <span>Texture resolution</span>
+                    <select id="image-impostor-size">
+                      <option value="64">64 × 64</option>
+                      <option value="128">128 × 128</option>
+                      <option value="256">256 × 256</option>
+                      <option value="512">512 × 512</option>
+                      <option value="1024" selected>1024 × 1024</option>
+                    </select>
+                  </label>
+                  <label class="numeric-control" for="image-impostor-area-ratio">
+                    <span>Max projected area multiplier</span>
+                    <input type="number" id="image-impostor-area-ratio" min="0.01" max="100" step="0.01" value="1" />
+                    <small>×</small>
+                  </label>
+                  <label class="numeric-control" for="image-impostor-reuse">
+                    <span>Camera movement for reuse</span>
+                    <input type="number" id="image-impostor-reuse" min="0" max="100" step="1" value="15" />
+                    <small>%</small>
+                  </label>
+                  <small id="image-impostor-status" role="status"></small>
+                  <div class="impostor-cache-location">
+                    <small>Temporary cache folder</small>
+                    <code id="image-impostor-cache-path">Opening local cache…</code>
+                  </div>
+                </div>
+                <button type="button" class="secondary-button" id="measure-impostors">Measure render time</button>
+                <small id="impostor-measurement" role="status"></small>
               </fieldset>
               <label class="camera-control" for="point-offset-control">
                 <span>Point cloud offset</span>
@@ -377,6 +417,7 @@
           >
             Exploded View
           </button>
+          <button class="fly-button" id="open-probes" type="button" disabled>Octree de probes</button>
           <label class="camera-control" for="exploded-decimation-control">
             <span>Exploded View points</span>
             <output id="exploded-decimation-value" for="exploded-decimation-control">10%</output>
@@ -396,6 +437,63 @@
       <div id="map" class="map" role="application">
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
+      <section id="probe-mode" hidden aria-label="Octree de probes de cámara" lang="es">
+        <div class="probe-viewport">
+          <canvas class="probe-cloud" tabindex="0" aria-label="Nube de puntos. Arrastra para orbitar, Mayús y arrastra para desplazar, o usa la rueda para acercar." ></canvas>
+          <canvas class="probe-overlay" aria-hidden="true"></canvas>
+          <div class="probe-view-controls">
+            <button id="probe-home" type="button">Encuadrar</button>
+            <button id="probe-orbit" type="button" hidden>Volver a órbita</button>
+            <label><input id="probe-overlay-toggle" type="checkbox" checked /> Superposiciones</label>
+          </div>
+          <output id="probe-view-status" class="probe-view-status" hidden></output>
+          <div id="probe-legend" class="probe-legend"><span>Activo</span><span>Subdividida</span><span>Resuelta</span><span>Pendiente</span></div>
+        </div>
+        <aside class="probe-panel" aria-labelledby="probe-title">
+          <header class="probe-header">
+            <h2 id="probe-title">Octree de probes</h2>
+            <button id="probe-close" type="button" aria-label="Cerrar modo de probes">Cerrar</button>
+          </header>
+          <details class="probe-settings" open>
+            <summary>Ajustes</summary>
+            <div class="probe-settings-grid">
+              <label>Margen (m)<input id="probe-margin" type="number" min="0" max="100000" step="any" value="1" /></label>
+              <label>Resolución (px)<select id="probe-resolution"><option>64</option><option selected>128</option><option>256</option><option>512</option></select></label>
+              <label>Umbral SSIM<input id="probe-threshold" type="number" min="0" max="1" step="any" value="0.98" /></label>
+              <label>Profundidad máxima<input id="probe-depth" type="number" min="0" max="8" step="1" value="3" /></label>
+              <label>Lado máximo (m)<input id="probe-max-size" type="number" min="0.001" step="any" /></label>
+              <label>Niveles antes de podar<input id="probe-lookahead" type="number" min="1" max="8" step="1" value="2" /></label>
+              <label>Presupuesto de caras<input id="probe-budget" type="number" min="1" max="20000" step="1" value="640" /></label>
+              <label>Puntos de referencia<input id="probe-point-budget" type="number" min="1" max="12000000" step="1" value="4000000" /></label>
+              <label>Candidata<select id="probe-representation"><option value="points">Nodos COPC</option><option value="image">Impostor de imagen</option></select></label>
+            </div>
+          </details>
+          <div class="probe-run-controls">
+            <button id="probe-start" type="button">Iniciar</button>
+            <button id="probe-pause" type="button" disabled>Pausar</button>
+            <button id="probe-step" type="button">Paso</button>
+          </div>
+          <label class="probe-pause-option"><input id="probe-pause-on-split" type="checkbox" checked /> Pausar al subdividir</label>
+          <p id="probe-progress" role="status"></p>
+          <div class="probe-history">
+            <label>Celda<select id="probe-cell" disabled></select></label>
+            <label>Probe<select id="probe-position" disabled></select></label>
+            <button id="probe-follow" type="button" disabled>Seguir cálculo</button>
+            <button id="probe-go" type="button" disabled>Ir al probe</button>
+          </div>
+          <p id="probe-decision"></p>
+          <p id="probe-source"></p>
+          <div id="probe-faces" aria-label="Caras del cubemap"></div>
+          <div class="probe-comparison">
+            <figure><canvas width="128" height="128"></canvas><figcaption>Referencia</figcaption></figure>
+            <figure><canvas width="128" height="128"></canvas><figcaption>Candidata</figcaption></figure>
+            <figure><canvas width="128" height="128"></canvas><figcaption>Error SSIM</figcaption></figure>
+          </div>
+          <p id="probe-score"></p>
+          <button id="probe-validate" type="button" disabled>Medir interior y diagonal</button>
+          <p id="probe-validation"></p>
+        </aside>
+      </section>
     </main>
     <button class="js-console-toggle" id="js-console-toggle" type="button" aria-expanded="false" aria-controls="js-console">Consola JS</button>
     <section class="js-console" id="js-console" aria-label="Consola JavaScript" hidden>
@@ -411,12 +509,17 @@
     <script src="./pointscape-lod-streaming.js?v=6"></script>
     <script src="./pointscape-copc-reader.js?v=4"></script>
     <script src="./pointscape-voxel-impostors.js?v=1"></script>
+    <script src="./pointscape-image-impostors.js?v=4"></script>
+    <script src="./pointscape-impostor-disk.js?v=1"></script>
     <script src="./pointscape-data-ingestion.js?v=4"></script>
     <script src="./pointscape-lod-system.js?v=5"></script>
     <script src="./pointscape-point-sizing.js?v=1"></script>
     <script src="./pointscape-exploded-view.js?v=1"></script>
-    <script src="./pointscape-ui-controller.js?v=7"></script>
-    <script src="./node-inspector.js?v=5"></script>
-    <script src="./script.js?v=62"></script>
+    <script src="./pointscape-ui-controller.js?v=10"></script>
+    <script src="./node-inspector.js?v=7"></script>
+    <script src="./pointscape-probe-octree.js?v=2"></script>
+    <script src="./pointscape-probe-renderer.js?v=2"></script>
+    <script src="./pointscape-probe-mode.js?v=2"></script>
+    <script src="./script.js?v=70"></script>
   </body>
 </html>

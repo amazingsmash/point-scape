@@ -33,7 +33,9 @@ test("COPC uses the original octree and decodes the requested LAZ chunk on deman
       return getBytes(begin, end);
     },
   });
-  const { tiles, sourcePointCount } = dataset.metadata;
+  const { tiles, sourcePointCount, pointBounds } = dataset.metadata;
+  assert.ok(pointBounds.minZ < pointBounds.maxZ);
+  assert.ok(pointBounds.minX < pointBounds.maxX && pointBounds.minY < pointBounds.maxY);
   assert.equal(sourcePointCount, 1065);
   assert.equal(tiles.length, 65);
   assert.equal(tiles.reduce((total, tile) => total + tile.sampledPointCount, 0), sourcePointCount);

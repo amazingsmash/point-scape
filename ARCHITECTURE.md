@@ -8,7 +8,8 @@ removed.
 
 PointScape is a static browser application served by `server.js`. The browser
 owns the map, UI, point-cloud rendering, LAS ingestion, indexing, temporary tile
-storage, and adaptive LOD selection.
+storage, and adaptive LOD selection. The optional image-impostor disk cache
+runs on the local Node server.
 
 The application currently uses plain scripts rather than a bundler. Files expose
 small namespaces/classes on `window` or `self`, and `script.js` wires those
@@ -22,7 +23,7 @@ classes together during startup.
   and prefers the frontmost point sprite within a small screen-space tolerance.
   It identifies the rendering node, not an arbitrary containing ancestor.
   Picking resolves cloud-to-cloud depth but does not sample the terrain depth buffer.
-  The inspector fetches one IndexedDB record, freezes that view independently
+  The inspector fetches one LAS or COPC node and freezes that view independently
   of map LOD, and builds local metric coordinates and full-node bounds. It never
   loads descendant subtrees. An optional equal-cell grid assists visual density
   inspection. A diagnostics snapshot comes directly from `PointScapeLodSystem`
@@ -57,7 +58,18 @@ classes together during startup.
   tests.
 - `pointscape-lod-streaming.js`: prioritized, bounded streaming, sample
   fallback residency, atomic QuadTree swaps, and conservative screen projection.
-- `tests/`: Node test suite for pure logic.
+- `pointscape-image-impostors.js`: captures cropped perspective color and depth,
+  manages resident image impostors, and collects per-node GPU timings.
+- `pointscape-impostor-disk.js` and `impostor-disk-cache.js`: browser client and
+  localhost server for the bounded temporary map-impostor cache.
+- `pointscape-probe-octree.js`: camera-cell subdivision, shared probe poses,
+  COPC candidate refinement, and SSIM-based decisions.
+- `pointscape-probe-renderer.js`: local metric coordinates, WebGL geometry,
+  isolated live rendering, and offscreen cubemap faces.
+- `pointscape-probe-mode.js` and `pointscape-probes.css`: isolated orbit camera,
+  execution controls, comparison history, overlays, and probe inspection.
+- `pointscape-probe-ssim.js`: luminance SSIM worker and per-pixel error map.
+- `tests/`: Node test suite for algorithms and the localhost cache.
 
 ## Data Flow
 
@@ -173,6 +185,59 @@ radius, the current projection matrix, framebuffer size, and each point's clip
 minimum and maximum screen radii and emits a circular point sprite. The maximum
 is also constrained by the GPU's advertised point-size range.
 
+### COPC camera-probe octree
+
+A run resolves the COPC hierarchy and decodes all reference nodes within the
+configured point budget. The renderer converts the points to local metric
+coordinates, gathers their bounds, and expands the camera-position root by
+the configured margin. The default reference limit is 4 million points. The
+panel allows up to 12 million.
+
+Each camera cell starts with seven poses: the center and six face centers.
+Children also receive captured parent poses that they contain. Integer octree
+coordinates identify shared poses across depths. Each pose uses six square
+90° perspectives on the cardinal axes. Color and depth attachments live in an
+offscreen framebuffer, independent of the orbit camera's visible framebuffer.
+A pixel-pack buffer and GPU fence defer readback, and the SSIM worker processes
+each face after capture. COPC decoding uses the existing worker pool.
+
+The central pose drives candidate construction. The algorithm starts at the
+COPC roots and tries cumulative groups of consecutive levels within a branch.
+A group is retained when its worst nonempty face changes beyond the configured
+SSIM threshold. Ahead-of-time checks of deeper levels catch detail that
+coarser levels may omit.
+
+The common candidate is checked against the full-point reference at each
+pose. SSIM averages local luminance windows over the expanded union of
+occupied pixels. Faces empty in both images are excluded from the worst score.
+Reference faces are cached by pose and face. Candidate results also key on the
+node selection and representation. A cell is accepted when the worst face
+passes and the maximum side-length condition holds. Subdivision keeps earlier
+results inspectable. Pending cells and positions outside the root use the
+normal COPC LOD path.
+
+The isolated viewport uses a resolved cell's stored selection when the camera
+is inside it. Selecting an evaluated probe after generation preserves its exact
+position and uses the inspected cell's selection even at a shared boundary.
+Choosing another cubemap face changes the orientation at that position. A
+separate validation action measures five diagonal and two additional interior
+poses using the remaining face budget. Closing the mode or starting a new run
+clears the stored probe results.
+
+### Proposed per-probe refinement
+
+The proposed refinement pass starts from the root payload and reads descendant
+blocks on demand. Each camera cell would evaluate 15 positions: its eight
+corners, six face centers, and center. Each probe would maintain its own last
+accepted selection and cubemap. The same loaded COPC block could be tested
+across all probes, with bounded block and face caches to reduce repeated
+downloads, decompression, and rendering.
+
+A probe would keep a branch when any populated face shows a significant
+change. It could prune after consecutive levels make no significant change.
+Disagreement among probes would trigger subdivision. Independent reference
+checks would measure the visual detail kept by the final selection.
+
 ## Ownership Boundaries
 
 - Ingestion owns file-to-worker communication and temporary storage.
@@ -180,7 +245,8 @@ is also constrained by the GPU's advertised point-size range.
   sampling policy.
 - LOD owns node activation decisions and expansion state.
 - UI owns input events and calls named application actions.
-- Rendering owns MapLibre/WebGL layer creation, buffer creation, and drawing.
+- Rendering owns MapLibre/WebGL layer creation, isolated probe rendering, and buffer lifecycle.
+- The probe octree owns cell subdivision and the accepted representation for each cell.
 
 ## Refactor Notes
 
@@ -202,9 +268,14 @@ Recommended next extractions:
 Current tests run with:
 
 ```bash
-node --test
+npm test
 ```
 
 Add tests around each extracted class as its dependencies become more explicit.
 The COPC test uses PDAL's
 [`1.2-with-color.copc.laz` fixture](https://github.com/PDAL/PDAL/blob/master/test/data/copc/1.2-with-color.copc.laz).
+
+The synthetic probe fixtures cover a one-cell scene and a narrow aperture.
+Probe tests verify 90° face projection, masked SSIM, lookahead through COPC
+levels, shared poses and captures, limits, and held-out diagonal measurements.
+Image-impostor tests verify reprojection and depth PNG round trips.

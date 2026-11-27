@@ -1,22 +1,31 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createImpostorDiskCache } = require("./impostor-disk-cache.js");
 
 // Listen on every local interface by default so the viewer is reachable from
 // other devices on the same trusted LAN. HOST can still restrict this when needed.
 const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 5173);
 const publicDir = __dirname;
+const impostorDiskCache = createImpostorDiskCache();
 const publicFiles = new Set([
   "/index.html",
   "/styles.css",
   "/node-inspector.css",
+  "/pointscape-probes.css",
+  "/pointscape-probe-octree.js",
+  "/pointscape-probe-renderer.js",
+  "/pointscape-probe-mode.js",
+  "/pointscape-probe-ssim.js",
   "/js-console.js",
   "/tile-selection.js",
   "/pointscape-lod-streaming.js",
   "/pointscape-data-ingestion.js",
   "/pointscape-copc-reader.js",
   "/pointscape-voxel-impostors.js",
+  "/pointscape-image-impostors.js",
+  "/pointscape-impostor-disk.js",
   "/copc.worker.js",
   "/vendor/copc-runtime.js",
   "/vendor/laz-perf.wasm",
@@ -55,6 +64,10 @@ function send(res, statusCode, body, contentType = "text/plain; charset=utf-8") 
 
 const server = http.createServer((req, res) => {
   const requestUrl = new URL(req.url, `http://${req.headers.host || host}`);
+  if (requestUrl.pathname.startsWith("/api/impostor-cache/")) {
+    impostorDiskCache.handle(req, res, requestUrl);
+    return;
+  }
   const requestedPath = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
 
   if (!publicFiles.has(requestedPath)) {
@@ -88,3 +101,11 @@ const server = http.createServer((req, res) => {
 server.listen(port, host, () => {
   console.log(`Servidor Node.js disponible en http://${host}:${port}`);
 });
+
+async function shutdown() {
+  server.close();
+  await impostorDiskCache.close();
+}
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);

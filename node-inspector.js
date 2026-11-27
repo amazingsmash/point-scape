@@ -81,80 +81,27 @@
       radius: Math.max(1, Math.hypot(...dimensions) / 2), count };
   }
 
-  const textureSize = 1024;
-
-  function createImpostorTextures(geometry, points, colorForClass, { bearing, pitch }) {
-    const heading = bearing * Math.PI / 180;
-    const tilt = pitch * Math.PI / 180;
-    const east = Math.sin(heading), north = Math.cos(heading);
-    const right = [north, -east, 0];
-    const up = [east * Math.cos(tilt), north * Math.cos(tilt), Math.sin(tilt)];
-    const towardCamera = [-east * Math.sin(tilt), -north * Math.sin(tilt), Math.cos(tilt)];
-    const project = (axis, x, y, z) => axis[0] * x + axis[1] * y + axis[2] * z;
-    const extent = (axis) => axis.reduce((sum, component, index) =>
-      sum + Math.abs(component) * geometry.dimensions[index] / 2, 0);
-    let halfSize = Math.max(extent(right), extent(up), 0.01);
-    let nearPlane = extent(towardCamera);
-    let farPlane = -nearPlane;
-    const { positions } = geometry;
-    for (let i = 0; i < positions.length; i += 3) {
-      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
-      halfSize = Math.max(halfSize, Math.abs(project(right, x, y, z)), Math.abs(project(up, x, y, z)));
-      const viewZ = project(towardCamera, x, y, z);
-      nearPlane = Math.max(nearPlane, viewZ);
-      farPlane = Math.min(farPlane, viewZ);
-    }
-    // Two texels of padding preserve the point footprint at the edges.
-    const metersPerTexel = 2 * halfSize / (textureSize - 4);
-    const color = new Uint8ClampedArray(textureSize * textureSize * 4);
-    // Linear distance in metres from the near plane. Infinity marks empty texels.
-    const depth = new Float32Array(textureSize * textureSize).fill(Infinity);
-    const palette = new Map();
-    for (let i = 0; i < geometry.count; i += 1) {
-      const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
-      const column = Math.floor(textureSize / 2 + project(right, x, y, z) / metersPerTexel - 0.5);
-      const row = Math.floor(textureSize / 2 - project(up, x, y, z) / metersPerTexel - 0.5);
-      const distance = Math.fround(nearPlane - project(towardCamera, x, y, z));
-      const classification = points.classifications?.[i] ?? points[i]?.classification ?? 0;
-      if (!palette.has(classification)) {
-        const [r, g, b] = colorForClass(classification);
-        palette.set(classification, [r * 255, g * 255, b * 255, 255]);
-      }
-      const rgba = palette.get(classification);
-      for (let dy = 0; dy < 2; dy += 1) {
-        for (let dx = 0; dx < 2; dx += 1) {
-          const pixel = (row + dy) * textureSize + column + dx;
-          if (distance >= depth[pixel]) continue;
-          depth[pixel] = distance;
-          color.set(rgba, pixel * 4);
-        }
-      }
-    }
-    return { width: textureSize, height: textureSize, color, depth, right, up, towardCamera,
-      metersPerTexel, nearPlane, farPlane };
-  }
-
   function paintTexturePreviews(dialog, textures) {
     const { width, height, color, depth } = textures;
-    let nearest = Infinity, farthest = 0;
-    for (const value of depth) {
-      if (!Number.isFinite(value)) continue;
-      nearest = Math.min(nearest, value);
-      farthest = Math.max(farthest, value);
+    let nearest = Infinity, farthest = -Infinity;
+    for (const pixel of textures.texels) {
+      nearest = Math.min(nearest, depth[pixel]);
+      farthest = Math.max(farthest, depth[pixel]);
     }
     const grayscale = new Uint8ClampedArray(color.length);
     const range = farthest - nearest || 1;
-    for (let i = 0; i < depth.length; i += 1) {
-      if (!Number.isFinite(depth[i])) continue;
-      const index = i * 4;
-      const shade = 255 * (1 - (depth[i] - nearest) / range);
+    for (const pixel of textures.texels) {
+      const index = pixel * 4;
+      const shade = 255 * (1 - (depth[pixel] - nearest) / range);
       grayscale[index] = grayscale[index + 1] = grayscale[index + 2] = shade;
       grayscale[index + 3] = 255;
     }
-    dialog.querySelector('[data-texture="color"]').getContext("2d")
-      .putImageData(new ImageData(color, width, height), 0, 0);
-    dialog.querySelector('[data-texture="depth"]').getContext("2d")
-      .putImageData(new ImageData(grayscale, width, height), 0, 0);
+    for (const [name, pixels] of [["color", color], ["depth", grayscale]]) {
+      const canvas = dialog.querySelector(`[data-texture="${name}"]`);
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").putImageData(new ImageData(pixels, width, height), 0, 0);
+    }
   }
 
   function formatDiagnosticNumber(value, digits = 2) {
@@ -308,8 +255,16 @@
       const tile = layer.tiles.find((tile) => tile.id === hit.id);
       const point = pointAt(tile?.points, hit.index);
       if (!point || !this.getMetadata(hit.id)) return;
-      this.selection = { ...hit, point, source: hit.renderKey.includes(":full:") ? "full" : "sample",
-        bearing: this.map.getBearing(), pitch: this.map.getPitch() };
+      const buffer = layer.tileBuffersById.get(hit.id);
+      const image = layer.imageCache?.active.get(hit.id);
+      this.selection = {
+        ...hit, point, source: hit.renderKey.includes(":full:") ? "full" : "sample",
+        cameraMatrix: image?.viewProjection || layer.pickMatrix,
+        aspect: image?.aspect || canvas.width / canvas.height,
+        imageSource: image ? buffer : null,
+        textureSize: image?.textureSize,
+        explodedOffset: (buffer.explodedOffsetMercator || 0) * (buffer.explodedProgress || 0),
+      };
       this.menu.querySelector("span").textContent = `Nodo ${hit.id}`;
       this.menu.hidden = false;
       this.menu.style.left = `${Math.max(8, Math.min(clientX, innerWidth - this.menu.offsetWidth - 8))}px`;
@@ -336,22 +291,23 @@
       const dialog = this.showDialog("Texturas del nodo", `
         <div class="node-inspector-textures" hidden>
           <figure><figcaption>Color por clasificación</figcaption>
-            <canvas data-texture="color" width="${textureSize}" height="${textureSize}" role="img" aria-label="Textura de color"></canvas></figure>
+            <canvas data-texture="color" role="img" aria-label="Textura de color"></canvas></figure>
           <figure><figcaption>Profundidad <span>Blanco cerca · negro lejos</span></figcaption>
-            <canvas data-texture="depth" width="${textureSize}" height="${textureSize}" role="img" aria-label="Textura de profundidad"></canvas></figure>
+            <canvas data-texture="depth" role="img" aria-label="Textura de profundidad"></canvas></figure>
         </div>`);
       const generation = this.generation;
       try {
-        const record = await this.getRecord(selection.id);
+        const record = selection.imageSource ? this.getMetadata(selection.id) : await this.getRecord(selection.id);
         if (generation !== this.generation) return;
         if (!record) throw new Error("El nodo ya no está disponible. Selecciona un punto de la nube actual.");
         const points = (selection.source === "full" ? record.fullPoints : record.points) || record.fullPoints || record.points;
-        const geometry = createGeometry(record, points, this.project);
-        const textures = createImpostorTextures(geometry, points, this.getClassColor, selection);
+        const textures = this.captureTextures(points, selection);
+        if (!textures) throw new Error("No se pudo proyectar el nodo desde la cámara seleccionada.");
         paintTexturePreviews(dialog, textures);
         dialog.querySelector(".node-inspector-textures").hidden = false;
+        const count = textures.texels.length.toLocaleString("es-ES");
         dialog.querySelector(".node-inspector-info").textContent =
-          `${record.fileName} · Nodo ${record.id} · ${geometry.count.toLocaleString("es-ES")} puntos · ${textureSize} × ${textureSize} px por textura`;
+          `${record.fileName} · Nodo ${record.id} · ${count} texels ocupados · ${textures.width} × ${textures.height} px por textura`;
       } catch (error) { if (generation === this.generation) this.showError(error); }
     }
     async open() {
@@ -552,7 +508,7 @@
       this.gl.getExtension("WEBGL_lose_context")?.loseContext();
     }
   }
-  const api = { Controller, pickPoint, createGeometry, createImpostorTextures, createLodDiagnosticGroups };
+  const api = { Controller, pickPoint, createGeometry, createLodDiagnosticGroups };
   scope.PointScapeNodeInspector = api;
   if (typeof module !== "undefined") module.exports = api;
 })(globalThis);

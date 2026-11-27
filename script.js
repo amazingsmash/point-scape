@@ -39,8 +39,12 @@ const pointCloudConfig = {
   visibilityExitMargin: 1.18,
   visibilityMinimumResidenceMs: 220,
   lodTransitionHoldMs: 220,
-  voxelImpostors: true,
+  impostorMode: "voxel",
+  impostorDebug: false,
   voxelMaxPixels: 5,
+  imageImpostorSize: PointScapeImageImpostors.defaultTextureSize,
+  imageImpostorAreaRatio: 1,
+  imageImpostorReuse: 15,
   pointRadiusCentimeters: 8,
   pointMinimumRadiusPixels: 0.75,
   pointMaximumRadiusPixels: 24,
@@ -143,7 +147,22 @@ const lasDrop = document.querySelector("#las-drop");
 const lasStatus = document.querySelector("#las-status");
 const copcDemoButton = document.querySelector("#copc-demo");
 const parisDemoButton = document.querySelector("#paris-demo");
-const voxelImpostorToggle = document.querySelector("#voxel-impostor-toggle");
+const impostorMode = document.querySelector("#impostor-mode");
+const impostorDebugToggle = document.querySelector("#impostor-debug-toggle");
+const voxelImpostorControls = document.querySelector("#voxel-impostor-controls");
+const imageImpostorControls = document.querySelector("#image-impostor-controls");
+const imageImpostorSize = document.querySelector("#image-impostor-size");
+const imageImpostorAreaRatio = document.querySelector("#image-impostor-area-ratio");
+const imageImpostorReuse = document.querySelector("#image-impostor-reuse");
+const imageImpostorStatus = document.querySelector("#image-impostor-status");
+const imageImpostorCachePath = document.querySelector("#image-impostor-cache-path");
+const pointscapeImageDisk = new PointScapeImpostorDisk.DiskCache((directory, writeFailed) => {
+  imageImpostorCachePath.textContent = directory || "Local disk cache unavailable";
+  imageImpostorCachePath.title = writeFailed ? "The last capture could not be saved" : directory || "";
+});
+const measureImpostorsButton = document.querySelector("#measure-impostors");
+const impostorMeasurementStatus = document.querySelector("#impostor-measurement");
+measureImpostorsButton.addEventListener("click", measureImpostorRenderTime);
 const voxelPixelControl = document.querySelector("#voxel-pixel-control");
 const voxelPixelValue = document.querySelector("#voxel-pixel-value");
 const copcDemos = new Map([
@@ -159,6 +178,33 @@ const requestedCopcWorkers = Number(copcOptions.get("copcWorkers"));
 const copcWorkerCount = [1, 2, 4].includes(requestedCopcWorkers) ? requestedCopcWorkers :
   (navigator.hardwareConcurrency >= 4 ? 2 : 1);
 const progressiveCopcHierarchy = copcOptions.get("copcHierarchy") !== "eager";
+const openProbesButton = document.querySelector("#open-probes");
+const probeMode = new PointScapeProbeMode(document.querySelector("#probe-mode"), {
+  lodConfig: pointCloudConfig,
+  createProgram: gl => {
+    const shader = createPointCloudShaders(true);
+    return createProgram(gl, shader.vertex, shader.fragment);
+  },
+  pointStyle: () => {
+    const palette = getShaderClassColorPalette();
+    const fallback = [...fallbackLasClassColor];
+    const colors = new Map([...lasClassColors].map(([code, rgba]) => [code, [...rgba]]));
+    return { radius: getPointPhysicalRadiusMeters(), min: getPointMinimumRadiusPixels(),
+      max: Math.max(getPointMinimumRadiusPixels(), getPointMaximumRadiusPixels()),
+      palette, fallback, color: code => colors.get(code) || fallback };
+  },
+  applyPalette: (gl, layer, { palette, fallback }) => setPointCloudClassColorUniforms(gl, layer, palette, fallback),
+  drawPasses: drawPointCloudPasses,
+  createTarget: (gl, width, height) => createCloudRenderTarget(gl, width, height, gl.DEPTH_COMPONENT24),
+  deleteTarget: deleteEdlDepthTarget,
+  captureImage: PointScapeImageImpostors.capture,
+  uploadImage: uploadImageImpostor,
+  deleteImage: deleteImageImpostor,
+  projectBounds: PointScapeLodStreaming.projectScreenBounds,
+  returnFocus: () => openProbesButton.focus(),
+});
+openProbesButton.addEventListener("click", () => probeMode.open(getProbeSource()));
+
 const flyToPointCloudButton = document.querySelector("#fly-to-point-cloud");
 const explodedViewButton = document.querySelector("#exploded-view");
 const explodedDecimationControl = document.querySelector("#exploded-decimation-control");
@@ -207,6 +253,18 @@ const pointscapeLasIngestion = new PointScapeDataIngestion.LasDataIngestionServi
   }),
 });
 const lodMercatorBounds = new WeakMap();
+
+function getNodeScreenBounds(tile, matrix, width, height, margin) {
+  if (!tile || !matrix || !width || !height) return null;
+  const geometryKey = `${terrainToggle.checked}:${getTerrainExaggeration()}:${getPointCloudOffsetMeters()}`;
+  let cached = lodMercatorBounds.get(tile);
+  if (cached?.key !== geometryKey) {
+    cached = { key: geometryKey, corners: createDetailBoxMercatorCorners(tile) };
+    lodMercatorBounds.set(tile, cached);
+  }
+  return PointScapeLodStreaming.projectScreenBounds(cached.corners, matrix, width, height, { margin });
+}
+
 const pointscapeLodSystem = new PointScapeLodSystem({
   config: pointCloudConfig,
   tileSelection: PointScapeTileSelection,
@@ -218,15 +276,7 @@ const pointscapeLodSystem = new PointScapeLodSystem({
   getScreenBounds: (tile, margin) => {
     const layer = window.pointCloudLayer;
     const canvas = window.mapLibreMap?.getCanvas?.();
-    if (!layer?.pickMatrix || !canvas) return null;
-    const geometryKey = `${terrainToggle.checked}:${getTerrainExaggeration()}:${getPointCloudOffsetMeters()}`;
-    let cached = lodMercatorBounds.get(tile);
-    if (cached?.key !== geometryKey) {
-      cached = { key: geometryKey, corners: createDetailBoxMercatorCorners(tile) };
-      lodMercatorBounds.set(tile, cached);
-    }
-    return PointScapeLodStreaming.projectScreenBounds(cached.corners,
-      layer.pickMatrix, canvas.clientWidth, canvas.clientHeight, { margin });
+    return getNodeScreenBounds(tile, layer?.pickMatrix, canvas?.clientWidth, canvas?.clientHeight, margin);
   },
 });
 const pointscapeUiController = new PointScapeUiController({
@@ -272,7 +322,13 @@ const pointscapeUiController = new PointScapeUiController({
     lasStatus,
     copcDemoButton,
     parisDemoButton,
-    voxelImpostorToggle,
+    impostorMode,
+    impostorDebugToggle,
+    voxelImpostorControls,
+    imageImpostorControls,
+    imageImpostorSize,
+    imageImpostorAreaRatio,
+    imageImpostorReuse,
     voxelPixelControl,
     voxelPixelValue,
     flyToPointCloudButton,
@@ -488,6 +544,8 @@ function initMap() {
 
   window.mapLibreMap.on("moveend", () => {
     failedCopcPages.clear();
+    const layer = window.pointCloudLayer;
+    layer?.imageTimings?.requestRefresh(layer.imageCache.active);
     if (copcPerformance) {
       copcPerformance.moveEndedAt = performance.now();
       copcPerformance.detailMs = null;
@@ -504,7 +562,17 @@ function initMap() {
     getRecord: (id) => getStoredTileRecord(id),
     project: (lng, lat, tile) => pointscapeLodSystem.projectLngLatToTileMetric(lng, lat, tile),
     getPointSize: () => getPointMaximumRadiusPixels() * 2,
-    getClassColor: getLasClassColor,
+    captureTextures: (points, selection) => {
+      const size = selection.textureSize ?? pointCloudConfig.imageImpostorSize;
+      if (selection.imageSource) {
+        return PointScapeImageImpostors.capture(selection.imageSource, selection.cameraMatrix,
+          selection.aspect, getLasClassColor, size);
+      }
+      const buffer = createPointCloudBuffer(points, window.mapLibreMap, terrainToggle.checked);
+      buffer.anchorMercator[2] += selection.explodedOffset;
+      return PointScapeImageImpostors.capture({ ...buffer, pickPositions: new Float32Array(buffer.data) },
+        selection.cameraMatrix, selection.aspect, getLasClassColor, size);
+    },
     getLodDiagnostics: (tile) => pointscapeLodSystem.getTileLodDiagnostics(
       tile,
       window.mapLibreMap,
@@ -666,7 +734,18 @@ function createWebGlPointCloudLayer() {
       this.voxelCornerLocation = gl.getAttribLocation(this.program, "a_voxel_corner");
       this.voxelEnabledLocation = gl.getUniformLocation(this.program, "u_voxel");
       this.voxelExtentLocation = gl.getUniformLocation(this.program, "u_voxel_extent");
+      this.impostorDebugLocation = gl.getUniformLocation(this.program, "u_impostor_debug");
       if (isWebGl2) {
+        this.imagePaletteKey = JSON.stringify([[...lasClassColors], fallbackLasClassColor]);
+        this.imageCache = new PointScapeImageImpostors.Cache(
+          textures => uploadImageImpostor(gl, textures), capture => deleteImageImpostor(gl, capture),
+          pointscapeImageDisk, () => map.triggerRepaint());
+        const timer = gl.getExtension("EXT_disjoint_timer_query_webgl2");
+        if (timer) this.imageTimings = new PointScapeImageImpostors.NodeTimings(gl, timer);
+        this.imageEnabledLocation = gl.getUniformLocation(this.program, "u_image");
+        this.imageColorLocation = gl.getUniformLocation(this.program, "u_image_color");
+        this.imageDepthLocation = gl.getUniformLocation(this.program, "u_image_depth");
+        this.imageInverseLocation = gl.getUniformLocation(this.program, "u_capture_inverse");
         const mesh = PointScapeVoxelImpostors.createCubeMesh();
         this.voxelVertexCount = mesh.length / 4;
         this.voxelMesh = gl.createBuffer();
@@ -754,6 +833,8 @@ function createWebGlPointCloudLayer() {
       const nextTileIds = new Set(nextTiles.map((tile) => tile.id));
 
       if (options.forceRebuild) {
+        this.imageCache?.clear();
+        this.imageTimings?.clear();
         deletePointCloudTileBuffers(this.gl, this.tileBuffers);
         this.tileBuffersById.clear();
       } else {
@@ -821,10 +902,34 @@ function createWebGlPointCloudLayer() {
         args?.modelViewProjectionMatrix ||
         args;
 
-      gl.useProgram(this.program);
-      gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
       this.pickMatrix = Array.from(matrix);
       schedulePointCloudTileRefreshAfterRenderedFrame();
+      if (this.imageCache && pointCloudConfig.impostorMode === "image" && !explodedViewActive && !explodedViewProgress) {
+        pointscapeImageDisk.connect();
+        const camera = PointScapeImageImpostors.cameraPosition(matrix);
+        const size = pointCloudConfig.imageImpostorSize;
+        const width = gl.drawingBufferWidth;
+        const height = gl.drawingBufferHeight;
+        const more = this.imageCache.update(this.tileBuffers, camera, {
+          size,
+          maxAreaRatio: pointCloudConfig.imageImpostorAreaRatio,
+          projectedArea: tile => {
+            const bounds = getNodeScreenBounds(currentTileById.get(tile.id), matrix, width, height, 1);
+            return bounds?.visible && !bounds.intersectsEyePlane ? bounds.area : 0;
+          },
+          reusePercent: pointCloudConfig.imageImpostorReuse,
+          palette: this.imagePaletteKey,
+          moving: window.mapLibreMap.isMoving(),
+        }, tile => PointScapeImageImpostors.capture(tile, matrix, width / height, getLasClassColor, size));
+        if (more) window.mapLibreMap.triggerRepaint();
+      } else if (this.imageCache?.entries.size || this.imageCache?.lookup) {
+        this.imageCache.clear();
+      }
+      this.imageTimings?.prepareFrame(this.tileBuffers, this.imageCache.active);
+      updateImageImpostorStats(this);
+      gl.useProgram(this.program);
+      gl.uniform1i(this.impostorDebugLocation, pointCloudConfig.impostorDebug);
+      gl.uniformMatrix4fv(this.matrixLocation, false, matrix);
       const canvas = gl.canvas;
       const pixelRatio = Math.max(1, canvas.width / Math.max(1, canvas.clientWidth));
       const pointSizeRange = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
@@ -856,87 +961,10 @@ function createWebGlPointCloudLayer() {
       gl.enableVertexAttribArray(this.positionLocation);
       gl.enableVertexAttribArray(this.classificationLocation);
 
-      const wasDepthTestEnabled = gl.isEnabled(gl.DEPTH_TEST);
-      const wasBlendEnabled = gl.isEnabled(gl.BLEND);
-      const wasCullEnabled = gl.isEnabled(gl.CULL_FACE);
-      if (this.tileBuffers.some(tile => tile.voxelSizeMeters)) gl.disable(gl.CULL_FACE);
-      const previousDepthFunction = gl.getParameter(gl.DEPTH_FUNC);
-      const previousDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
-      const previousColorMask = gl.getParameter(gl.COLOR_WRITEMASK);
-      const previousBlendSourceRgb = gl.getParameter(gl.BLEND_SRC_RGB);
-      const previousBlendDestinationRgb = gl.getParameter(gl.BLEND_DST_RGB);
-      const previousBlendSourceAlpha = gl.getParameter(gl.BLEND_SRC_ALPHA);
-      const previousBlendDestinationAlpha = gl.getParameter(gl.BLEND_DST_ALPHA);
-      const previousBlendEquationRgb = gl.getParameter(gl.BLEND_EQUATION_RGB);
-      const previousBlendEquationAlpha = gl.getParameter(
-        gl.BLEND_EQUATION_ALPHA,
-      );
-
-      let edlTextureBinding;
-      let previousActiveTexture;
-      const edlActive = pointCloudConfig.edlEnabled && this.pointCount > 0 &&
-        ensureEdlDepthTarget(this, gl);
-      if (edlActive) {
-        renderEdlDepthMap(this, gl, matrix);
-        previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
-        gl.activeTexture(gl.TEXTURE0);
-        edlTextureBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
-        gl.bindTexture(gl.TEXTURE_2D, this.edlTarget.texture);
-        gl.uniform1i(this.edlDepthMapLocation, 0);
-        gl.uniform2f(this.edlTextureSizeLocation, gl.drawingBufferWidth, gl.drawingBufferHeight);
-        gl.uniform1f(this.edlRadiusLocation, pointCloudConfig.edlRadiusPixels * pixelRatio);
-        gl.uniform1f(this.edlStrengthLocation, pointCloudConfig.edlStrength);
-        gl.uniform1i(this.edlNeighborsLocation, pointCloudConfig.edlNeighborCount);
-        gl.uniform1i(this.edlEnabledLocation, 1);
-      }
-
-      gl.enable(gl.DEPTH_TEST);
-      gl.depthFunc(gl.LEQUAL);
-      gl.depthMask(true);
-      gl.colorMask(false, false, false, false);
-      gl.disable(gl.BLEND);
-      gl.uniform1i(this.edlEnabledLocation, 0);
-      drawPointCloudTileBuffers(this, gl, matrix);
-
-      gl.colorMask(true, true, true, true);
-      gl.depthFunc(gl.EQUAL);
-      gl.depthMask(false);
-      gl.enable(gl.BLEND);
-      gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
-      gl.blendFuncSeparate(
-        gl.SRC_ALPHA,
-        gl.ONE_MINUS_SRC_ALPHA,
-        gl.ONE,
-        gl.ONE_MINUS_SRC_ALPHA,
-      );
-      gl.uniform1i(this.edlEnabledLocation, edlActive ? 1 : 0);
-      drawPointCloudTileBuffers(this, gl, matrix);
-
-      if (edlActive) {
-        gl.bindTexture(gl.TEXTURE_2D, edlTextureBinding);
-        gl.activeTexture(previousActiveTexture);
-      }
-
-      gl.depthFunc(previousDepthFunction);
-      gl.depthMask(previousDepthMask);
-      gl.colorMask(...previousColorMask);
-      gl.blendFuncSeparate(
-        previousBlendSourceRgb,
-        previousBlendDestinationRgb,
-        previousBlendSourceAlpha,
-        previousBlendDestinationAlpha,
-      );
-      gl.blendEquationSeparate(
-        previousBlendEquationRgb,
-        previousBlendEquationAlpha,
-      );
-      if (!wasDepthTestEnabled) {
-        gl.disable(gl.DEPTH_TEST);
-      }
-      if (!wasBlendEnabled) {
-        gl.disable(gl.BLEND);
-      }
-      if (wasCullEnabled) gl.enable(gl.CULL_FACE);
+      drawPointCloudPasses(this, gl, matrix, pixelRatio, this.tileBuffers, this.imageCache?.active);
+      if (this.imageTimings?.finishFrame()) window.mapLibreMap.triggerRepaint();
+      updateImageMeasurement(this);
+      runImpostorMeasurementFrame(this, gl, matrix, pixelRatio);
       gl.disableVertexAttribArray(this.positionLocation);
       gl.disableVertexAttribArray(this.classificationLocation);
       gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -947,6 +975,9 @@ function createWebGlPointCloudLayer() {
     },
 
     onRemove(map, gl) {
+      finishImpostorMeasurement(this, "Measurement stopped because the point cloud layer was reset.");
+      this.imageCache?.clear();
+      this.imageTimings?.clear();
       deleteEdlDepthTarget(gl, this.edlTarget);
       this.edlTarget = null;
       deletePointCloudTileBuffers(gl, this.tileBuffers);
@@ -958,6 +989,90 @@ function createWebGlPointCloudLayer() {
       }
     },
   };
+}
+
+function drawPointCloudPasses(layer, gl, matrix, pixelRatio, tiles, images) {
+  const wasDepthTestEnabled = gl.isEnabled(gl.DEPTH_TEST);
+  const wasBlendEnabled = gl.isEnabled(gl.BLEND);
+  const wasCullEnabled = gl.isEnabled(gl.CULL_FACE);
+  if (tiles.some(tile => tile.voxelSizeMeters)) gl.disable(gl.CULL_FACE);
+  const previousDepthFunction = gl.getParameter(gl.DEPTH_FUNC);
+  const previousDepthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+  const previousColorMask = gl.getParameter(gl.COLOR_WRITEMASK);
+  const previousBlendSourceRgb = gl.getParameter(gl.BLEND_SRC_RGB);
+  const previousBlendDestinationRgb = gl.getParameter(gl.BLEND_DST_RGB);
+  const previousBlendSourceAlpha = gl.getParameter(gl.BLEND_SRC_ALPHA);
+  const previousBlendDestinationAlpha = gl.getParameter(gl.BLEND_DST_ALPHA);
+  const previousBlendEquationRgb = gl.getParameter(gl.BLEND_EQUATION_RGB);
+  const previousBlendEquationAlpha = gl.getParameter(
+    gl.BLEND_EQUATION_ALPHA,
+  );
+
+  let edlTextureBinding;
+  let previousActiveTexture;
+  const edlActive = !layer.isolated && pointCloudConfig.edlEnabled && layer.pointCount > 0 &&
+    ensureEdlDepthTarget(layer, gl);
+  if (edlActive) {
+    renderEdlDepthMap(layer, gl, matrix, tiles, images);
+    previousActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+    gl.activeTexture(gl.TEXTURE0);
+    edlTextureBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+    gl.bindTexture(gl.TEXTURE_2D, layer.edlTarget.texture);
+    gl.uniform1i(layer.edlDepthMapLocation, 0);
+    gl.uniform2f(layer.edlTextureSizeLocation, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.uniform1f(layer.edlRadiusLocation, pointCloudConfig.edlRadiusPixels * pixelRatio);
+    gl.uniform1f(layer.edlStrengthLocation, pointCloudConfig.edlStrength);
+    gl.uniform1i(layer.edlNeighborsLocation, pointCloudConfig.edlNeighborCount);
+    gl.uniform1i(layer.edlEnabledLocation, 1);
+  }
+
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.depthMask(true);
+  gl.colorMask(false, false, false, false);
+  gl.disable(gl.BLEND);
+  gl.uniform1i(layer.edlEnabledLocation, 0);
+  drawPointCloudTileBuffers(layer, gl, matrix, tiles, images);
+
+  gl.colorMask(true, true, true, true);
+  gl.depthFunc(gl.EQUAL);
+  gl.depthMask(false);
+  gl.enable(gl.BLEND);
+  gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+  gl.blendFuncSeparate(
+    gl.SRC_ALPHA,
+    gl.ONE_MINUS_SRC_ALPHA,
+    gl.ONE,
+    gl.ONE_MINUS_SRC_ALPHA,
+  );
+  gl.uniform1i(layer.edlEnabledLocation, edlActive ? 1 : 0);
+  drawPointCloudTileBuffers(layer, gl, matrix, tiles, images);
+
+  if (edlActive) {
+    gl.bindTexture(gl.TEXTURE_2D, edlTextureBinding);
+    gl.activeTexture(previousActiveTexture);
+  }
+
+  gl.depthFunc(previousDepthFunction);
+  gl.depthMask(previousDepthMask);
+  gl.colorMask(...previousColorMask);
+  gl.blendFuncSeparate(
+    previousBlendSourceRgb,
+    previousBlendDestinationRgb,
+    previousBlendSourceAlpha,
+    previousBlendDestinationAlpha,
+  );
+  gl.blendEquationSeparate(
+    previousBlendEquationRgb,
+    previousBlendEquationAlpha,
+  );
+  if (!wasDepthTestEnabled) {
+    gl.disable(gl.DEPTH_TEST);
+  }
+  if (!wasBlendEnabled) {
+    gl.disable(gl.BLEND);
+  }
+  if (wasCullEnabled) gl.enable(gl.CULL_FACE);
 }
 
 function deleteEdlDepthTarget(gl, target) {
@@ -975,8 +1090,11 @@ function ensureEdlDepthTarget(layer, gl) {
     return true;
   }
   deleteEdlDepthTarget(gl, layer.edlTarget);
-  layer.edlTarget = null;
+  layer.edlTarget = createCloudRenderTarget(gl, width, height);
+  return Boolean(layer.edlTarget);
+}
 
+function createCloudRenderTarget(gl, width, height, depthFormat = gl.DEPTH_COMPONENT16) {
   const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
   const previousRenderbuffer = gl.getParameter(gl.RENDERBUFFER_BINDING);
   const previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
@@ -994,7 +1112,7 @@ function ensureEdlDepthTarget(layer, gl) {
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0,
     gl.RGBA, gl.UNSIGNED_BYTE, null);
   gl.bindRenderbuffer(gl.RENDERBUFFER, target.depth);
-  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
+  gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat, width, height);
   gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
     gl.TEXTURE_2D, target.texture, 0);
@@ -1006,13 +1124,254 @@ function ensureEdlDepthTarget(layer, gl) {
   gl.bindTexture(gl.TEXTURE_2D, previousTexture);
   if (!complete) {
     deleteEdlDepthTarget(gl, target);
-    return false;
+    return null;
   }
-  layer.edlTarget = target;
-  return true;
+  return target;
 }
 
-function renderEdlDepthMap(layer, gl, matrix) {
+const impostorMeasurementSamples = 8;
+
+function updateImageMeasurement(layer) {
+  if (pointCloudConfig.impostorMode !== "image") {
+    if (impostorMeasurementStatus.dataset.mode === "image") {
+      delete impostorMeasurementStatus.dataset.mode;
+      impostorMeasurementStatus.textContent = "";
+    }
+    return;
+  }
+
+  const timing = layer.imageTimings;
+  const active = layer.imageCache?.active;
+  let pointsTotal = 0, imagesTotal = 0, compared = 0;
+  const formatTime = value => `${value.toFixed(3)} ms`;
+  for (const [id, image] of active || []) {
+    const points = timing?.points.get(layer.tileBuffersById.get(id));
+    const imageTime = timing?.images.get(image);
+    if (points !== undefined && imageTime !== undefined) {
+      compared += 1;
+      pointsTotal += points;
+      imagesTotal += imageTime;
+    }
+  }
+  let status;
+  if (!timing || timing.unavailable) {
+    status = "Image timing requires a working WebGL GPU timer.";
+  } else if (!compared) {
+    status = active?.size || timing.pending.length
+      ? "Waiting for GPU timings…" : "Show image impostors to measure their render time.";
+  } else {
+    const difference = pointsTotal - imagesTotal;
+    const change = difference >= 0 ? "Saved" : "Added";
+    const percent = pointsTotal > 0 ? ` (${(Math.abs(difference) / pointsTotal * 100).toFixed(1)}%)` : "";
+    status = `Last points ${formatTime(pointsTotal)} · Images ${formatTime(imagesTotal)} · ${change} ${formatTime(Math.abs(difference))}${percent} · ${compared}/${active.size} nodes`;
+  }
+  impostorMeasurementStatus.dataset.mode = "image";
+  if (impostorMeasurementStatus.textContent !== status) impostorMeasurementStatus.textContent = status;
+}
+
+async function measureImpostorRenderTime() {
+  const map = window.mapLibreMap;
+  const layer = window.pointCloudLayer;
+  if (layer?.impostorMeasurement) return;
+  const mode = pointCloudConfig.impostorMode;
+  if (mode === "image") {
+    if (layer?.imageTimings && !layer.imageTimings.unavailable && layer.imageCache.active.size) {
+      layer.imageTimings.requestRefresh(layer.imageCache.active);
+      map.triggerRepaint();
+    }
+    if (layer) updateImageMeasurement(layer);
+    return;
+  }
+  const tiles = layer?.tileBuffers || [];
+  const voxelTiles = tiles.filter(tile => tile.voxelSizeMeters && tile.pointCount);
+  const nodeCount = mode === "voxel" ? voxelTiles.length : 0;
+  delete impostorMeasurementStatus.dataset.mode;
+  if (!nodeCount || map?.isMoving() || layer.imageCache?.active.size) {
+    impostorMeasurementStatus.textContent = "Stop the camera with at least one impostor visible, then measure again.";
+    return;
+  }
+
+  const gl = layer.gl;
+  const job = {
+    mode, tiles, nodeCount, pointBuffers: new Map(), samples: [],
+    extension: gl.getExtension("EXT_disjoint_timer_query_webgl2"),
+    abort: new AbortController(),
+    width: gl.drawingBufferWidth, height: gl.drawingBufferHeight,
+  };
+  layer.impostorMeasurement = job;
+  measureImpostorsButton.disabled = true;
+  impostorMeasurementStatus.textContent = "Preparing the point baseline…";
+  try {
+    // Compare the voxel draw with the original node payload.
+    for (const tile of voxelTiles) {
+      const record = await getTileRepresentation(tile.id, "sample", job.abort.signal);
+      if (layer.impostorMeasurement !== job) return;
+      if (!getPointSetCount(record?.points)) throw new Error("The source points for a voxel node are unavailable.");
+      const previousBuffer = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+      job.pointBuffers.set(tile.id, createPointCloudTileBuffer(gl, { id: tile.id, points: record.points },
+        map, terrainToggle.checked));
+      gl.bindBuffer(gl.ARRAY_BUFFER, previousBuffer);
+    }
+    job.baseline = tiles.map(tile => job.pointBuffers.get(tile.id) || tile);
+    impostorMeasurementStatus.textContent = "Measuring the point cloud. Keep the camera still.";
+    map.triggerRepaint();
+  } catch (error) {
+    if (layer.impostorMeasurement === job) finishImpostorMeasurement(layer, error.message);
+  }
+}
+
+function finishImpostorMeasurement(layer, message) {
+  const job = layer.impostorMeasurement;
+  if (!job) return;
+  layer.impostorMeasurement = null;
+  job.abort.abort();
+  const gl = layer.gl;
+  deletePointCloudTileBuffers(gl, [...job.pointBuffers.values()]);
+  deleteEdlDepthTarget(gl, job.target);
+  job.queries?.forEach(query => gl.deleteQuery(query));
+  measureImpostorsButton.disabled = false;
+  impostorMeasurementStatus.textContent = message;
+}
+
+function runImpostorMeasurementFrame(layer, gl, matrix, pixelRatio) {
+  const job = layer.impostorMeasurement;
+  if (!job) return;
+  const map = window.mapLibreMap;
+  const activeImages = layer.imageCache?.active;
+  if (map.isMoving() || layer.tileBuffers !== job.tiles || pointCloudConfig.impostorMode !== job.mode ||
+      gl.drawingBufferWidth !== job.width || gl.drawingBufferHeight !== job.height ||
+      activeImages?.size) {
+    finishImpostorMeasurement(layer, "The view changed. Measure again once it settles.");
+    return;
+  }
+  if (!job.baseline) return;
+
+  if (job.queries) {
+    const disjoint = gl.getParameter(job.extension.GPU_DISJOINT_EXT);
+    if (disjoint || performance.now() - job.queryStarted > 4000) {
+      useSynchronizedImpostorTiming(job, gl);
+    } else if (job.queries.every(query => gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE))) {
+      const pair = job.queries.map(query => gl.getQueryParameter(query, gl.QUERY_RESULT) / 1e6);
+      if (pair.every(value => value > 0 && Number.isFinite(value))) {
+        job.queries.forEach(query => gl.deleteQuery(query));
+        job.queries = null;
+        job.samples.push(pair);
+      } else {
+        useSynchronizedImpostorTiming(job, gl);
+      }
+    } else {
+      map.triggerRepaint();
+      return;
+    }
+  }
+
+  if (job.samples.length === impostorMeasurementSamples) {
+    const median = index => {
+      const times = job.samples.map(pair => pair[index]).sort((a, b) => a - b);
+      const middle = times.length / 2;
+      return (times[middle - 1] + times[middle]) / 2;
+    };
+    const points = median(0), impostors = median(1);
+    const difference = points - impostors;
+    const change = difference >= 0 ? "Saved" : "Added";
+    const percent = points > 0 ? ` (${(Math.abs(difference) / points * 100).toFixed(1)}%)` : "";
+    const method = job.extension ? "GPU timer" : "CPU + GPU estimate";
+    finishImpostorMeasurement(layer, `Points ${points.toFixed(2)} ms · Voxels ${impostors.toFixed(2)} ms · ${change} ${Math.abs(difference).toFixed(2)} ms${percent}. ${method}, median of ${job.samples.length} pairs · ${job.nodeCount} impostor nodes.`);
+    return;
+  }
+
+  const readFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+  const drawFramebuffer = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+  try {
+    job.target ||= createCloudRenderTarget(gl, job.width, job.height);
+    if (!job.target) throw new Error("Could not create the offscreen measurement target.");
+    if (job.extension && gl.getQuery(job.extension.TIME_ELAPSED_EXT, gl.CURRENT_QUERY)) {
+      useSynchronizedImpostorTiming(job, gl);
+    }
+    measureImpostorPair(layer, gl, matrix, pixelRatio, job);
+  } catch (error) {
+    finishImpostorMeasurement(layer, error.message);
+    return;
+  } finally {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFramebuffer);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawFramebuffer);
+  }
+  map.triggerRepaint();
+}
+
+function useSynchronizedImpostorTiming(job, gl) {
+  job.queries?.forEach(query => gl.deleteQuery(query));
+  job.queries = null;
+  job.extension = null;
+  job.samples.length = 0;
+}
+
+function measureImpostorPair(layer, gl, matrix, pixelRatio, job) {
+  const viewport = gl.getParameter(gl.VIEWPORT);
+  const colorMask = gl.getParameter(gl.COLOR_WRITEMASK);
+  const depthMask = gl.getParameter(gl.DEPTH_WRITEMASK);
+  const scissor = gl.isEnabled(gl.SCISSOR_TEST);
+  const stencil = gl.isEnabled(gl.STENCIL_TEST);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, job.target.framebuffer);
+  gl.viewport(0, 0, job.width, job.height);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.STENCIL_TEST);
+  gl.colorMask(true, true, true, true);
+  gl.depthMask(true);
+  // Debug coloring bypasses EDL shading on impostors. Time the normal shader.
+  gl.uniform1i(layer.impostorDebugLocation, false);
+  const clearColor = new Float32Array(4);
+  const clearDepth = new Float32Array([1]);
+  const draw = useImpostors => {
+    gl.clearBufferfv(gl.COLOR, 0, clearColor);
+    gl.clearBufferfv(gl.DEPTH, 0, clearDepth);
+    drawPointCloudPasses(layer, gl, matrix, pixelRatio,
+      useImpostors ? job.tiles : job.baseline, null);
+  };
+  try {
+    if (!job.warmed) {
+      draw(false);
+      draw(true);
+      job.warmed = true;
+      return;
+    }
+    const order = job.samples.length % 2 ? [1, 0] : [0, 1];
+    if (job.extension) {
+      const target = job.extension.TIME_ELAPSED_EXT;
+      job.queries = [];
+      job.queryStarted = performance.now();
+      for (const variant of order) {
+        const query = gl.createQuery();
+        if (!query) throw new Error("Could not start the GPU timer.");
+        job.queries[variant] = query;
+        gl.beginQuery(target, query);
+        try { draw(variant === 1); } finally { gl.endQuery(target); }
+      }
+      gl.flush();
+      return;
+    }
+    // Average a short batch to reduce the effect of rounded browser timestamps.
+    const repeats = 3;
+    const pair = [];
+    for (const variant of order) {
+      gl.finish();
+      const start = performance.now();
+      for (let i = 0; i < repeats; i += 1) draw(variant === 1);
+      gl.finish();
+      pair[variant] = (performance.now() - start) / repeats;
+    }
+    job.samples.push(pair);
+  } finally {
+    gl.uniform1i(layer.impostorDebugLocation, pointCloudConfig.impostorDebug);
+    gl.viewport(...viewport);
+    gl.colorMask(...colorMask);
+    gl.depthMask(depthMask);
+    if (scissor) gl.enable(gl.SCISSOR_TEST);
+    if (stencil) gl.enable(gl.STENCIL_TEST);
+  }
+}
+
+function renderEdlDepthMap(layer, gl, matrix, tiles, images) {
   const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING);
   const previousViewport = gl.getParameter(gl.VIEWPORT);
   const previousClearColor = gl.getParameter(gl.COLOR_CLEAR_VALUE);
@@ -1033,7 +1392,7 @@ function renderEdlDepthMap(layer, gl, matrix) {
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.uniform1i(layer.edlDepthPassLocation, 1);
   gl.uniform1i(layer.edlEnabledLocation, 0);
-  drawPointCloudTileBuffers(layer, gl, matrix);
+  drawPointCloudTileBuffers(layer, gl, matrix, tiles, images);
   gl.uniform1i(layer.edlDepthPassLocation, 0);
   gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
   gl.viewport(...previousViewport);
@@ -1412,8 +1771,18 @@ function getMercatorPointCloudAnchor(points) {
   ];
 }
 
-function drawPointCloudTileBuffers(layer, gl, matrix) {
-  (layer.tileBuffers || []).forEach((tileBuffer) => {
+function drawPointCloudTileBuffers(layer, gl, matrix, tiles, images) {
+  const textureUnits = [gl.TEXTURE1, gl.TEXTURE2];
+  const previousActiveUnit = images?.size ? gl.getParameter(gl.ACTIVE_TEXTURE) : null;
+  const previousTextures = previousActiveUnit === null ? [] : textureUnits.map(unit => {
+    gl.activeTexture(unit);
+    return gl.getParameter(gl.TEXTURE_BINDING_2D);
+  });
+  if (images?.size) {
+    gl.uniform1i(layer.imageColorLocation, 1);
+    gl.uniform1i(layer.imageDepthLocation, 2);
+  }
+  tiles.forEach((tileBuffer) => {
     if (!tileBuffer.buffer || !tileBuffer.pointCount) {
       return;
     }
@@ -1423,13 +1792,30 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
       multiplyMatrixAndMercatorPoint(matrix, tileBuffer.anchorMercator),
     );
     gl.uniform1f(layer.metersToMercatorLocation, tileBuffer.metersToMercator || 0);
-    const metadata = currentTileById.get(tileBuffer.id);
+    const metadata = layer.isolated ? null : currentTileById.get(tileBuffer.id);
     tileBuffer.explodedOffsetMercator = metadata
       ? PointScapeExplodedView.offsetMeters(metadata.depth, explodedViewLayout) *
         (tileBuffer.metersToMercator || 0) : 0;
     tileBuffer.explodedProgress = explodedViewProgress;
     gl.uniform1f(layer.explodedOffsetLocation,
       tileBuffer.explodedOffsetMercator * explodedViewProgress);
+    const image = images?.get(tileBuffer.id);
+    if (image) {
+      gl.uniform1i(layer.voxelEnabledLocation, false);
+      gl.uniform1i(layer.imageEnabledLocation, true);
+      gl.uniformMatrix4fv(layer.imageInverseLocation, false, image.inverseCameraMatrix);
+      for (const [index, texture] of [image.color, image.depth].entries()) {
+        gl.activeTexture(textureUnits[index]);
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, image.buffer);
+      gl.vertexAttribPointer(layer.positionLocation, 1, gl.FLOAT, false, 0, 0);
+      gl.disableVertexAttribArray(layer.classificationLocation);
+      drawTimedNodePoints(layer, gl, tileBuffer, image.texelCount);
+      gl.enableVertexAttribArray(layer.classificationLocation);
+      gl.uniform1i(layer.imageEnabledLocation, false);
+      return;
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, tileBuffer.buffer);
     gl.vertexAttribPointer(
       layer.positionLocation,
@@ -1450,7 +1836,7 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
     const voxel = Boolean(tileBuffer.voxelSizeMeters && layer.voxelMesh);
     gl.uniform1i(layer.voxelEnabledLocation, voxel);
     if (!voxel) {
-      gl.drawArrays(gl.POINTS, 0, tileBuffer.pointCount);
+      drawTimedNodePoints(layer, gl, tileBuffer, tileBuffer.pointCount);
       return;
     }
     const side = tileBuffer.voxelSizeMeters * tileBuffer.metersToMercator;
@@ -1465,6 +1851,54 @@ function drawPointCloudTileBuffers(layer, gl, matrix) {
     gl.vertexAttribDivisor(layer.classificationLocation, 0);
     gl.disableVertexAttribArray(layer.voxelCornerLocation);
   });
+  if (previousActiveUnit !== null) {
+    previousTextures.forEach((texture, index) => {
+      gl.activeTexture(textureUnits[index]);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+    });
+    gl.activeTexture(previousActiveUnit);
+  }
+}
+
+function drawTimedNodePoints(layer, gl, tile, count) {
+  const timed = layer.imageTimings?.beginDraw(tile);
+  gl.drawArrays(gl.POINTS, 0, count);
+  if (timed) layer.imageTimings.endDraw();
+}
+
+function uploadImageImpostor(gl, textures) {
+  const previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  const previousBuffer = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+  const unpackFlip = gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL);
+  const unpackPremultiply = gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  const upload = (format, layout, type, pixels) => {
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, format, textures.width, textures.height, 0, layout, type, pixels);
+    return texture;
+  };
+  const color = upload(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(textures.color.buffer));
+  const depth = upload(gl.R32F, gl.RED, gl.FLOAT, textures.depth);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, textures.texels, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, previousBuffer);
+  gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, unpackFlip);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, unpackPremultiply);
+  return { color, depth, buffer, texelCount: textures.texels.length,
+    cameraMatrix: textures.cameraMatrix, inverseCameraMatrix: new Float32Array(textures.inverseCameraMatrix),
+    viewProjection: textures.viewProjection, aspect: textures.aspect, textureSize: textures.width };
+}
+
+function deleteImageImpostor(gl, capture) {
+  gl.deleteTexture(capture.color);
+  gl.deleteTexture(capture.depth);
+  gl.deleteBuffer(capture.buffer);
 }
 
 function createPointCloudBuffer(points, map, useTerrainElevation) {
@@ -1609,13 +2043,12 @@ function getShaderClassColorPalette() {
   return { codes, colors, count: entries.length };
 }
 
-function setPointCloudClassColorUniforms(gl, layer) {
-  const palette = getShaderClassColorPalette();
+function setPointCloudClassColorUniforms(gl, layer, palette = getShaderClassColorPalette(), fallback = fallbackLasClassColor) {
 
   gl.uniform1i(layer.classCountLocation, palette.count);
   gl.uniform1fv(layer.classCodesLocation, palette.codes);
   gl.uniform4fv(layer.classColorsLocation, palette.colors);
-  gl.uniform4fv(layer.fallbackColorLocation, fallbackLasClassColor);
+  gl.uniform4fv(layer.fallbackColorLocation, fallback);
 }
 
 function randomizeLasClassColors() {
@@ -1623,6 +2056,11 @@ function randomizeLasClassColors() {
     lasClassColors.set(code, createRandomClassColor(code));
   });
   fallbackLasClassColor.splice(0, 4, ...createRandomClassColor(999));
+  const layer = window.pointCloudLayer;
+  if (layer?.imageCache) {
+    layer.imagePaletteKey = JSON.stringify([[...lasClassColors], fallbackLasClassColor]);
+    layer.imageCache.clear();
+  }
 
   renderClassificationLegend();
   window.mapLibreMap?.triggerRepaint();
@@ -1701,6 +2139,10 @@ function createPointCloudShaders(isWebGl2) {
         uniform float u_depth_bias;
         uniform bool u_voxel;
         uniform vec3 u_voxel_extent;
+        uniform bool u_image;
+        uniform highp sampler2D u_image_color;
+        uniform highp sampler2D u_image_depth;
+        uniform mat4 u_capture_inverse;
         uniform int u_class_count;
         uniform float u_class_codes[${maxShaderClassColors}];
         uniform vec4 u_class_colors[${maxShaderClassColors}];
@@ -1728,7 +2170,19 @@ function createPointCloudShaders(isWebGl2) {
 
         void main() {
           vec3 position = a_position + vec3(0.0, 0.0, u_exploded_offset);
-          if (u_voxel) position += a_voxel_corner.xyz * u_voxel_extent;
+          if (u_image) {
+            ivec2 size = textureSize(u_image_depth, 0);
+            int index = int(a_position.x);
+            ivec2 pixel = ivec2(index % size.x, index / size.x);
+            vec2 ndc = (vec2(pixel) + 0.5) * 2.0 / vec2(size) - 1.0;
+            float depth = texelFetch(u_image_depth, pixel, 0).r;
+            vec4 local = u_capture_inverse * vec4(ndc.x, -ndc.y, depth, 1.0);
+            position = local.xyz / local.w;
+            v_color = texelFetch(u_image_color, pixel, 0);
+          } else {
+            if (u_voxel) position += a_voxel_corner.xyz * u_voxel_extent;
+            v_color = getClassColor(a_classification);
+          }
           gl_Position = u_anchor_clip + u_matrix * vec4(position, 0.0);
           gl_Position.z -= u_depth_bias * gl_Position.w;
           v_edl_depth = log2(max(abs(gl_Position.w), 0.000001));
@@ -1740,7 +2194,6 @@ function createPointCloudShaders(isWebGl2) {
             u_min_point_radius_px,
             u_max_point_radius_px
           );
-          v_color = getClassColor(a_classification);
           if (u_voxel) v_color = vec4(v_color.rgb * a_voxel_corner.w, 1.0);
         }
       `,
@@ -1804,12 +2257,14 @@ function createPointCloudShaders(isWebGl2) {
 }
 
 function createEdlPointFragmentShader(isWebGl2) {
+  const highlightImpostors = isWebGl2 ? "u_impostor_debug && (u_image || u_voxel)" : "false";
   return `${isWebGl2 ? "#version 300 es" : ""}
     precision highp float;
     ${isWebGl2 ? "in" : "varying"} vec4 v_color;
     ${isWebGl2 ? "in" : "varying"} float v_edl_depth;
     uniform bool u_edl_depth_pass;
     uniform bool u_voxel;
+    ${isWebGl2 ? "uniform bool u_image; uniform bool u_impostor_debug;" : ""}
     uniform bool u_edl_enabled;
     uniform sampler2D u_edl_depth_map;
     uniform vec2 u_edl_texture_size;
@@ -1831,6 +2286,8 @@ function createEdlPointFragmentShader(isWebGl2) {
         float packed = floor(depth * 65535.0 + 0.5);
         color = vec4(mod(packed, 256.0) / 255.0,
                      floor(packed / 256.0) / 255.0, 0.0, 1.0);
+      } else if (${highlightImpostors}) {
+        color = vec4(0.224, 1.0, 0.0, 1.0);
       } else if (u_edl_enabled) {
         vec2 uv = gl_FragCoord.xy / u_edl_texture_size;
         vec4 center = ${isWebGl2 ? "texture" : "texture2D"}(u_edl_depth_map, uv);
@@ -2636,10 +3093,39 @@ function getTileRepresentation(tileKey, source, signal) {
   return pointscapeTileStore.getRepresentation(tileKey, source);
 }
 
+function getProbeSource() {
+  const sources = [...copcTileSources.values()];
+  if (pointCloudLoadInProgress || !sources.length || !currentTileIndex.length ||
+      currentPointCloudSummary?.indexingMode !== "copc") return null;
+  const bounds = { ...sources[0].pointBounds };
+  for (const source of sources.slice(1)) {
+    for (const axis of ["X", "Y", "Z"]) {
+      bounds[`min${axis}`] = Math.min(bounds[`min${axis}`], source.pointBounds[`min${axis}`]);
+      bounds[`max${axis}`] = Math.max(bounds[`max${axis}`], source.pointBounds[`max${axis}`]);
+    }
+  }
+  return {
+    bounds,
+    pointCount: sources.reduce((sum, source) => sum + source.decodeInfo.header.pointCount, 0),
+    impostorSize: pointCloudConfig.imageImpostorSize,
+    records: () => currentTileIndex,
+    read: (id, signal) => getTileRepresentation(id, "sample", signal),
+    requestPages: requestVisibleCopcPages,
+    async loadHierarchy(signal) {
+      const batches = await Promise.all(sources.map(source => source.client.request("all-pages", {}, signal)));
+      signal.throwIfAborted();
+      const records = batches.flat();
+      integrateCopcTiles(records);
+      return records;
+    },
+  };
+}
+
 function integrateCopcTiles(tiles) {
   if (!tiles.length) return;
   currentTileIndex = mergeTileMetadataRecords(currentTileIndex, tiles);
   for (const tile of tiles) currentTileById.set(tile.id, tile);
+  probeMode.recordsChanged();
   if (!currentPointCloudStats || !currentPointCloudSummary) return;
   currentPointCloudSummary.tileCount = currentTileIndex.length;
   currentPointCloudStats.tileCount = currentTileIndex.length;
@@ -2959,7 +3445,7 @@ function forEachPointInSet(pointSet, callback) {
 
 function selectActiveTiles(records, map) {
   const activeTiles = pointscapeLodSystem.selectActiveTiles(records, map, {
-    voxelEnabled: pointCloudConfig.voxelImpostors && Boolean(window.pointCloudLayer?.voxelMesh),
+    voxelEnabled: pointCloudConfig.impostorMode === "voxel" && Boolean(window.pointCloudLayer?.voxelMesh),
     verticalScale: terrainToggle.checked ? getTerrainExaggeration() : 1,
     offsetMeters: getPointCloudOffsetMeters(),
   });
@@ -3276,6 +3762,27 @@ function updateVoxelDistanceInfo(decisions) {
   if (status.textContent !== text) status.textContent = text;
 }
 
+function updateImageImpostorStats(layer) {
+  const active = layer.imageCache?.active;
+  const images = { nodeCount: active?.size || 0, texelCount: 0, sourceCount: 0 };
+  for (const [id, capture] of active || []) {
+    images.texelCount += capture.texelCount;
+    images.sourceCount += layer.tileBuffersById.get(id).pointCount;
+  }
+  const maxArea = pointCloudConfig.imageImpostorSize ** 2 * pointCloudConfig.imageImpostorAreaRatio;
+  const status = layer.imageCache
+    ? `${formatInteger(images.nodeCount)} image nodes · ${formatInteger(layer.imageCache.captures)} captures · ${formatInteger(layer.imageCache.diskHits)} disk hits · ≤ ${formatInteger(Math.floor(maxArea))} px²`
+    : "Color and depth impostors require WebGL 2.";
+  if (imageImpostorStatus.textContent !== status) imageImpostorStatus.textContent = status;
+  const stats = currentPointCloudStats;
+  if (!stats || Object.keys(images).every(key => images[key] === (stats.images?.[key] || 0))) return;
+  stats.images = images;
+  renderPointCloudStats();
+  if (!explodedViewActive && !explodedViewProgress) {
+    updatePointCloudStatus(stats.renderedPointCount, stats.visibleSourcePointCount, stats.activeTileCount, stats.voxels ?? undefined);
+  }
+}
+
 function updatePointCloudStatus(renderedPointCount, availablePointCount, activeTileCount, voxels = { count: 0 }) {
   if (!currentPointCloudSummary) {
     return;
@@ -3288,12 +3795,16 @@ function updatePointCloudStatus(renderedPointCount, availablePointCount, activeT
     indexingMode,
     indexingModeLabel = "QuadTree",
   } = currentPointCloudSummary;
+  const images = currentPointCloudStats?.images;
+  const points = formatInteger(Math.max(0, renderedPointCount - (images?.sourceCount || 0)));
   const pointSummary = indexingMode === "copc"
-    ? `${renderedPointCount.toLocaleString("en-US")} points rendered`
-    : `${renderedPointCount.toLocaleString("en-US")} points rendered from ${availablePointCount.toLocaleString("en-US")} visible source points`;
+    ? `${points} points rendered`
+    : `${points} points rendered from ${formatInteger(availablePointCount)} visible source points`;
   const voxelSummary = voxels.count
     ? ` + ${voxels.count.toLocaleString("en-US")} voxels (${voxels.nodeCount} nodes)` : "";
-  lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${pointSummary}${voxelSummary} - ${crsSummary}`;
+  const imageSummary = images?.nodeCount
+    ? ` + ${formatInteger(images.texelCount)} reprojected texels (${images.nodeCount} nodes)` : "";
+  lasStatus.textContent = `${indexingModeLabel} - ${fileCount} ${fileCount === 1 ? "file" : "files"} - ${activeTileCount.toLocaleString("en-US")} active / ${tileCount.toLocaleString("en-US")} tiles - ${pointSummary}${voxelSummary}${imageSummary} - ${crsSummary}`;
 }
 
 function updateLivePointCloudStats(renderedPointCount, availablePointCount, activeTileCount, voxels = null) {
@@ -3362,8 +3873,12 @@ function renderPointCloudStats(stats = currentPointCloudStats) {
       rows: [
         ["Source points", formatInteger(stats.sourcePointCount)],
         ...(copcOnly ? [] : [["Valid points", formatInteger(stats.validPointCount)]]),
-        ["Rendered now", formatInteger(stats.renderedPointCount || 0)],
+        ["Rendered now", formatInteger(Math.max(0, (stats.renderedPointCount || 0) - (stats.images?.sourceCount || 0)))],
         ["Visible source", formatInteger(stats.visibleSourcePointCount || 0)],
+        ...(stats.images?.nodeCount ? [
+          ["Image impostor nodes", formatInteger(stats.images.nodeCount)],
+          ["Reprojected texels", formatInteger(stats.images.texelCount)],
+        ] : []),
         ...(renderedVoxels ? [
           ["Voxels", formatInteger(renderedVoxels)],
           ["Points represented by voxels", formatInteger(replacedPoints)],
@@ -3715,6 +4230,8 @@ async function loadPointCloudFiles(files) {
   const fileLabel =
     files.length === 1 ? files[0].name : `${files.length} point cloud files`;
   pointCloudLoadInProgress = true;
+  probeMode.close(false);
+  openProbesButton.disabled = true;
   lasFileInput.disabled = true;
   copcDemoButton.disabled = true;
   parisDemoButton.disabled = true;
@@ -3863,7 +4380,7 @@ async function loadPointCloudFiles(files) {
           client.close();
           throw error;
         }
-        copcTileSources.set(index, { client, input, decodeInfo: result.decodeInfo });
+        copcTileSources.set(index, { client, input, decodeInfo: result.decodeInfo, pointBounds: result.pointBounds });
         crsLabelByFile.set(index, result.crsLabel);
         crsByFile.set(index, result.crs);
         sourcePointCountByFile.set(index, result.sourcePointCount);
@@ -3989,6 +4506,7 @@ async function loadPointCloudFiles(files) {
       error.message || "The point cloud files could not be read.";
   } finally {
     pointCloudLoadInProgress = false;
+    openProbesButton.disabled = !getProbeSource();
     lasFileInput.disabled = false;
     copcDemoButton.disabled = false;
     parisDemoButton.disabled = false;

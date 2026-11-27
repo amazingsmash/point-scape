@@ -121,15 +121,34 @@
         actions.updateDetailBoxesLayer();
       });
 
-      const updateVoxels = () => {
-        actions.config.voxelImpostors = elements.voxelImpostorToggle.checked;
+      const updateImpostors = () => {
+        actions.config.impostorMode = elements.impostorMode.value;
         actions.config.voxelMaxPixels = Number(elements.voxelPixelControl.value);
+        actions.config.imageImpostorSize = Number(elements.imageImpostorSize.value);
         elements.voxelPixelValue.textContent = `${actions.config.voxelMaxPixels} px`;
-        elements.voxelPixelControl.disabled = !actions.config.voxelImpostors;
+        elements.voxelImpostorControls.hidden = actions.config.impostorMode !== "voxel";
+        elements.imageImpostorControls.hidden = actions.config.impostorMode !== "image";
         actions.applyPointCloudTileSelection({ updateStatus: true });
+        actions.getMap()?.triggerRepaint();
       };
-      elements.voxelImpostorToggle.addEventListener("change", updateVoxels);
-      elements.voxelPixelControl.addEventListener("input", updateVoxels);
+      elements.impostorMode.addEventListener("change", updateImpostors);
+      elements.impostorDebugToggle.addEventListener("change", () => {
+        actions.config.impostorDebug = elements.impostorDebugToggle.checked;
+        actions.getMap()?.triggerRepaint();
+      });
+      elements.voxelPixelControl.addEventListener("input", updateImpostors);
+      elements.imageImpostorSize.addEventListener("change", updateImpostors);
+      const imageNumberControls = [
+        [elements.imageImpostorAreaRatio, "imageImpostorAreaRatio"],
+        [elements.imageImpostorReuse, "imageImpostorReuse"],
+      ];
+      for (const [control, key] of imageNumberControls) {
+        control.addEventListener("change", () => {
+          if (control.value !== "") actions.config[key] = actions.readNumericControl(control, actions.config[key]);
+          control.value = actions.config[key];
+          actions.getMap()?.triggerRepaint();
+        });
+      }
 
       elements.randomizeClassificationColorsButton?.addEventListener("click", () => {
         actions.randomizeLasClassColors();

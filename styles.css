@@ -479,6 +479,17 @@ body {
   font-weight: 800;
 }
 
+.impostor-controls { display: grid; gap: 8px; }
+.impostor-controls[hidden] { display: none; }
+.impostor-cache-location { display: grid; gap: 4px; }
+.impostor-cache-location code { font-size: 11px; overflow-wrap: anywhere; user-select: text; }
+#impostor-mode, #image-impostor-size {
+  grid-column: 1 / -1;
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+}
+
 .camera-control {
   display: grid;
   grid-template-columns: 1fr auto;
