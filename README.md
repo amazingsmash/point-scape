@@ -83,6 +83,39 @@ On Windows, the repository also includes `lanzar.cmd` and `lanzar.ps1` as conven
 
 Local point cloud files stay in the browser. For COPC, PointScape reads the embedded hierarchy and decompresses individual nodes as the view needs them. COPC on the map requires a horizontal coordinate system declared in WKT and supported by Proj4.
 
+### Probe individual
+
+Abre **PointScape → Probe individual** y carga un `.obj`. La escena usa fondo negro y
+muestra sus vértices y, cuando existen, las aristas de sus caras y líneas.
+Arrastra el círculo naranja para mover el probe. Mantén **Mayús** mientras lo
+arrastras para ajustar Z, o escribe las coordenadas del OBJ en el panel.
+Arrastra el fondo para orbitar y usa la rueda para acercar.
+
+**Generar cubemap** captura seis caras cuadradas de 90° desde esa posición.
+El análisis parte de la raíz del octree de vértices y añade un nodo cada vez.
+Si todas las caras alcanzan el **Umbral SSIM** al comparar las capturas con y
+sin el nodo candidato, se poda esa rama y se siguen evaluando las demás.
+Al final se comparan las seis caras con la referencia del nivel elegido.
+Si alguna queda por debajo del umbral, se recuperan nodos de ramas podadas
+hasta alcanzarlo o agotar los candidatos.
+
+El visor muestra los puntos conservados y las cajas de sus nodos. Pulsa una
+miniatura para comparar esa cara con la nube completa y ver su SSIM final.
+Haz doble clic en una miniatura o en una de las capturas para ver las dos
+imágenes ampliadas. También puedes usar **Ampliar comparación**.
+El control **Frustums 90°** muestra un cubo compacto con las seis direcciones
+de captura. La miniatura elegida resalta su cara dentro del cubo.
+**Caja resaltada** identifica un nodo del árbol y **Ver OBJ
+original** recupera el modelo inicial. Si mueves el probe, vuelve a generar
+el cubemap para analizar la nueva posición.
+
+El mismo modo acepta archivos COPC y reutiliza sus nodos originales. También
+puedes cargar **París · Torre Eiffel** desde el panel. **Referencia COPC hasta**
+indica el último nivel incluido en la comparación y el total de puntos que
+abarca. El ejemplo de París empieza en el nivel 2 y con el probe situado en
+el entorno de la Torre Eiffel. Las coordenadas del probe COPC son metros
+locales respecto al centro de la nube.
+
 ### Octree de probes de cámara
 
 Con el visor abierto en [localhost](http://127.0.0.1:5173/), carga una nube COPC y selecciona **PointScape → Octree de probes**. La vista usa una cámara independiente. Arrastra para orbitar, mantén Mayús para desplazar y usa la rueda para acercar. Puedes ocultar **Superposiciones** para inspeccionar la nube sobre negro.

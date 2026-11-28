@@ -4,6 +4,11 @@
       this.elements = elements;
       this.actions = actions;
       this.isBound = false;
+      elements.menuToggle.addEventListener("click", () => {
+        const isOpen = elements.menuToggle.getAttribute("aria-expanded") === "true";
+        elements.menuToggle.setAttribute("aria-expanded", String(!isOpen));
+        elements.menuContent.hidden = isOpen;
+      });
     }
 
     bind() {
@@ -20,12 +25,6 @@
       actions.syncPointSizingControlsFromConfig();
       actions.syncEdlControlsFromConfig();
       actions.renderPointCloudStats();
-
-      elements.menuToggle.addEventListener("click", () => {
-        const isOpen = elements.menuToggle.getAttribute("aria-expanded") === "true";
-        elements.menuToggle.setAttribute("aria-expanded", String(!isOpen));
-        elements.menuContent.hidden = isOpen;
-      });
 
       elements.baseLayerInputs.forEach((input) => {
         input.addEventListener("change", () => {

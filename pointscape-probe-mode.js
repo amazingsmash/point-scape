@@ -738,4 +738,5 @@
   }
 
   scope.PointScapeProbeMode = Mode;
+  scope.PointScapeProbeView = { paint, coordinates, screen, segment };
 })(globalThis);

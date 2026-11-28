@@ -179,7 +179,7 @@ const copcWorkerCount = [1, 2, 4].includes(requestedCopcWorkers) ? requestedCopc
   (navigator.hardwareConcurrency >= 4 ? 2 : 1);
 const progressiveCopcHierarchy = copcOptions.get("copcHierarchy") !== "eager";
 const openProbesButton = document.querySelector("#open-probes");
-const probeMode = new PointScapeProbeMode(document.querySelector("#probe-mode"), {
+const probeRenderDeps = {
   lodConfig: pointCloudConfig,
   createProgram: gl => {
     const shader = createPointCloudShaders(true);
@@ -201,9 +201,26 @@ const probeMode = new PointScapeProbeMode(document.querySelector("#probe-mode"),
   uploadImage: uploadImageImpostor,
   deleteImage: deleteImageImpostor,
   projectBounds: PointScapeLodStreaming.projectScreenBounds,
+};
+const probeMode = new PointScapeProbeMode(document.querySelector("#probe-mode"), {
+  ...probeRenderDeps,
   returnFocus: () => openProbesButton.focus(),
 });
 openProbesButton.addEventListener("click", () => probeMode.open(getProbeSource()));
+const objProbeMode = new PointScapeObjProbeMode(document.querySelector("#obj-probe-mode"), {
+  ...probeRenderDeps,
+  pointStyle: () => ({ radius: 0, min: 1.25, max: 1.25, fallback: [0.84, 0.91, 1, 1] }),
+  applyPalette(gl, layer, { fallback }) {
+    gl.uniform1i(layer.classCountLocation, 0);
+    gl.uniform4fv(layer.fallbackColorLocation, fallback);
+  },
+  createLineProgram: createProgram,
+  copcRenderer: probeRenderDeps,
+  copcWorkers: copcWorkerCount,
+  copcPointBudget: pointCloudConfig.residentPointBudget,
+  paris: { ...copcDemos.get("paris"), position: [2.2968, 48.8566, 77], target: [2.29448, 48.85837, 136] },
+});
+document.querySelector("#open-obj-probe").addEventListener("click", () => objProbeMode.open());
 
 const flyToPointCloudButton = document.querySelector("#fly-to-point-cloud");
 const explodedViewButton = document.querySelector("#exploded-view");

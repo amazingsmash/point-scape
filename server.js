@@ -18,6 +18,8 @@ const publicFiles = new Set([
   "/pointscape-probe-renderer.js",
   "/pointscape-probe-mode.js",
   "/pointscape-probe-ssim.js",
+  "/pointscape-probe-obj.js",
+  "/pointscape-probe-obj-mode.js",
   "/js-console.js",
   "/tile-selection.js",
   "/pointscape-lod-streaming.js",

@@ -47,7 +47,7 @@
       const bytes = new Uint8Array(storage);
       for (let i = 0; i < points.pointCount; i++) {
         convert(points.lngLatAlt, i * 3, positions, i * 4);
-        bytes[i * 16 + 12] = points.classifications[i];
+        bytes[i * 16 + 12] = points.classifications?.[i] ?? 0;
         if (bounds) {
           for (let axis = 0; axis < 3; axis++) {
             const value = positions[i * 4 + axis];
@@ -118,6 +118,13 @@
       this.imageBytes = 0;
     }
 
+    releaseAnalysis(id) {
+      const tile = this.analysis.get(id);
+      if (!tile) return;
+      this.gl.deleteBuffer(tile.buffer);
+      this.analysis.delete(id);
+    }
+
     visible(nodes, matrix, width, height) {
       return nodes.filter(node => this.deps.projectBounds(node.localCorners, matrix, width, height)?.visible);
     }
@@ -182,10 +189,10 @@
       }
     }
 
-    async capture(position, face, selection, size, impostorSize, signal) {
+    async capture(position, face, selection, size, impostorSize, signal, far = this.span * 4) {
       const gl = this.gl;
       const { direction, up } = faces[face];
-      const matrix = viewProjection(position, direction, up, this.near, this.span * 4);
+      const matrix = viewProjection(position, direction, up, this.near, far);
       const drawNodes = this.visible(selection.nodes, matrix, size, size);
       if (selection.representation === "image" && !this.preparedImages.has(selection)) {
         await this.prepareImages(selection.nodes, impostorSize, signal);

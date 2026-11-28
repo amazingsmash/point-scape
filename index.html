@@ -17,7 +17,7 @@
     />
     <link rel="stylesheet" href="./styles.css" />
     <link rel="stylesheet" href="./node-inspector.css?v=4" />
-    <link rel="stylesheet" href="./pointscape-probes.css?v=2" />
+    <link rel="stylesheet" href="./pointscape-probes.css?v=5" />
   </head>
   <body>
     <section
@@ -418,6 +418,7 @@
             Exploded View
           </button>
           <button class="fly-button" id="open-probes" type="button" disabled>Octree de probes</button>
+          <button class="fly-button" id="open-obj-probe" type="button">Probe individual</button>
           <label class="camera-control" for="exploded-decimation-control">
             <span>Exploded View points</span>
             <output id="exploded-decimation-value" for="exploded-decimation-control">10%</output>
@@ -437,7 +438,7 @@
       <div id="map" class="map" role="application">
         <p class="map-status" id="map-status">Loading map...</p>
       </div>
-      <section id="probe-mode" hidden aria-label="Octree de probes de cámara" lang="es">
+      <section id="probe-mode" class="probe-scene" hidden aria-label="Octree de probes de cámara" lang="es">
         <div class="probe-viewport">
           <canvas class="probe-cloud" tabindex="0" aria-label="Nube de puntos. Arrastra para orbitar, Mayús y arrastra para desplazar, o usa la rueda para acercar." ></canvas>
           <canvas class="probe-overlay" aria-hidden="true"></canvas>
@@ -494,6 +495,72 @@
           <p id="probe-validation"></p>
         </aside>
       </section>
+      <dialog id="obj-probe-mode" class="probe-scene" aria-labelledby="obj-probe-title" lang="es">
+        <div class="probe-viewport">
+          <canvas class="probe-cloud" aria-label="Vista 3D del OBJ y del probe"></canvas>
+          <canvas class="probe-overlay" aria-hidden="true"></canvas>
+          <div id="obj-probe-camera" class="probe-view-controls" hidden>
+            <button id="obj-probe-home" type="button">Encuadrar</button>
+            <label><input id="obj-probe-boxes" type="checkbox" checked /> Cajas</label>
+            <label><input id="obj-probe-frustum" type="checkbox" checked /> Frustums 90°</label>
+          </div>
+          <p id="obj-probe-hint" class="probe-legend" hidden>Arrastra el círculo naranja para mover el probe. Mayús al arrastrarlo ajusta Z. Arrastra el fondo para orbitar y usa la rueda para acercar.</p>
+        </div>
+        <aside class="probe-panel" aria-labelledby="obj-probe-title">
+          <header class="probe-header">
+            <h2 id="obj-probe-title">Probe individual</h2>
+            <button id="obj-probe-close" type="button">Cerrar</button>
+          </header>
+          <label class="obj-probe-file">Archivo OBJ o COPC<input id="obj-probe-file" type="file" accept=".obj,.copc,.laz" /></label>
+          <button id="obj-probe-paris" type="button">Cargar París · Torre Eiffel</button>
+          <p id="obj-probe-status" role="status"></p>
+          <fieldset id="obj-probe-position" class="probe-settings-grid obj-probe-position" disabled>
+            <legend>Posición del probe en el OBJ</legend>
+            <label>X<input id="obj-probe-x" type="number" step="any" required /></label>
+            <label>Y<input id="obj-probe-y" type="number" step="any" required /></label>
+            <label>Z<input id="obj-probe-z" type="number" step="any" required /></label>
+          </fieldset>
+          <fieldset id="obj-probe-settings" class="probe-settings-grid" disabled>
+            <legend>Captura</legend>
+            <label>Resolución por cara<select id="obj-probe-resolution"><option value="64">64 px</option><option value="128" selected>128 px</option><option value="256">256 px</option></select></label>
+            <label>Umbral SSIM<input id="obj-probe-threshold" type="number" min="0" max="1" step="any" value="0.98" required /></label>
+            <label id="obj-probe-copc-depth" hidden>Referencia COPC hasta<select id="obj-probe-depth"></select></label>
+          </fieldset>
+          <div class="probe-run-controls">
+            <button id="obj-probe-generate" type="button" disabled>Generar cubemap</button>
+            <button id="obj-probe-stop" type="button" disabled>Cancelar</button>
+          </div>
+          <p id="obj-probe-progress" role="status"></p>
+          <section id="obj-probe-cubemap" aria-label="Cubemap de la nube de puntos" hidden>
+            <div id="obj-probe-faces" aria-label="Caras de 90 grados del cubemap"></div>
+            <div class="probe-comparison">
+              <figure><canvas id="obj-probe-reference-image" width="128" height="128" title="Doble clic para ampliar"></canvas><figcaption id="obj-probe-reference-label">Nube completa</figcaption></figure>
+              <figure><canvas id="obj-probe-selection-image" width="128" height="128" title="Doble clic para ampliar"></canvas><figcaption>Nodos seleccionados</figcaption></figure>
+            </div>
+            <div class="obj-probe-compare-controls">
+              <p id="obj-probe-face-score"></p>
+              <button id="obj-probe-enlarge" type="button" aria-haspopup="dialog" disabled>Ampliar comparación</button>
+            </div>
+            <div class="probe-history">
+              <label>Caja resaltada<select id="obj-probe-nodes" disabled><option value="">Todos los nodos</option></select></label>
+              <label class="obj-probe-original"><input id="obj-probe-original" type="checkbox" disabled /> <span id="obj-probe-original-label">Ver OBJ original</span></label>
+            </div>
+          </section>
+        </aside>
+        <dialog id="obj-probe-expanded" class="obj-probe-expanded" aria-labelledby="obj-probe-expanded-title" aria-describedby="obj-probe-expanded-info">
+          <header class="probe-header">
+            <div>
+              <h2 id="obj-probe-expanded-title"></h2>
+              <p id="obj-probe-expanded-info"></p>
+            </div>
+            <button id="obj-probe-expanded-close" type="button" autofocus>Cerrar comparación</button>
+          </header>
+          <div class="probe-comparison">
+            <figure><figcaption id="obj-probe-expanded-label">Nube completa</figcaption><canvas id="obj-probe-expanded-reference" role="img" aria-labelledby="obj-probe-expanded-label"></canvas></figure>
+            <figure><figcaption id="obj-probe-expanded-selection-label">Nodos seleccionados</figcaption><canvas id="obj-probe-expanded-selection" role="img" aria-labelledby="obj-probe-expanded-selection-label"></canvas></figure>
+          </div>
+        </dialog>
+      </dialog>
     </main>
     <button class="js-console-toggle" id="js-console-toggle" type="button" aria-expanded="false" aria-controls="js-console">Consola JS</button>
     <section class="js-console" id="js-console" aria-label="Consola JavaScript" hidden>
@@ -515,11 +582,12 @@
     <script src="./pointscape-lod-system.js?v=5"></script>
     <script src="./pointscape-point-sizing.js?v=1"></script>
     <script src="./pointscape-exploded-view.js?v=1"></script>
-    <script src="./pointscape-ui-controller.js?v=10"></script>
+    <script src="./pointscape-ui-controller.js?v=11"></script>
     <script src="./node-inspector.js?v=7"></script>
-    <script src="./pointscape-probe-octree.js?v=2"></script>
-    <script src="./pointscape-probe-renderer.js?v=2"></script>
-    <script src="./pointscape-probe-mode.js?v=2"></script>
-    <script src="./script.js?v=70"></script>
+    <script src="./pointscape-probe-octree.js?v=5"></script>
+    <script src="./pointscape-probe-renderer.js?v=3"></script>
+    <script src="./pointscape-probe-mode.js?v=3"></script>
+    <script src="./pointscape-probe-obj-mode.js?v=5"></script>
+    <script src="./script.js?v=72"></script>
   </body>
 </html>

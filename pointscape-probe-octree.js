@@ -31,6 +31,64 @@
     return x.flatMap((value, i) => [value, y[i], a * w[i] + (i === 3 ? b : 0), w[i]]);
   }
 
+  function frustumCorners(eye, { direction, up }, near, far) {
+    const right = cross(direction, up);
+    return [near, far].flatMap(distance => Array.from({ length: 4 }, (_, i) => eye.map((value, axis) =>
+      value + distance * (direction[axis] + (i & 1 ? 1 : -1) * right[axis] + (i & 2 ? 1 : -1) * up[axis]))));
+  }
+
+  async function selectAtProbe(root, { threshold, reference, capture, compare, signal, onProgress }) {
+    const nodes = [root];
+    let cubemap = await capture(nodes);
+    const pending = [...root.children];
+    const pruned = [];
+    const worst = scores => Math.min(...scores.map(value => value ?? 1));
+    let tested = 0;
+    onProgress({ nodes, cubemap, tested, pending: pending.length });
+    for (let i = 0; i < pending.length; i++) {
+      signal.throwIfAborted();
+      const node = pending[i];
+      if (node.pointCount === 0) {
+        pending.push(...node.children);
+        continue;
+      }
+      const trial = await capture([...nodes, node], { node, cubemap });
+      const scores = await Promise.all(trial.map((image, index) => image === cubemap[index]
+        ? 1 : compare(cubemap[index], image)));
+      signal.throwIfAborted();
+      const score = worst(scores);
+      const kept = score < threshold;
+      if (kept) {
+        nodes.push(node);
+        cubemap = trial;
+        pending.push(...node.children);
+      } else {
+        pruned.push({ node, score });
+      }
+      onProgress({ nodes, cubemap, node, tested: ++tested, pending: pending.length - i - 1, score, kept });
+    }
+
+    let scores = await Promise.all(reference.map((image, index) => compare(image, cubemap[index])));
+    signal.throwIfAborted();
+    // Small differences can accumulate across pruned branches. Revisit the most visible changes first.
+    const restore = pruned.sort((a, b) => a.score - b.score).map(({ node }) => node);
+    let restored = 0;
+    for (let i = 0; worst(scores) < threshold && i < restore.length; i++) {
+      const node = restore[i];
+      restore.push(...node.children);
+      if (node.pointCount === 0) continue;
+      const trial = await capture([...nodes, node], { node, cubemap });
+      scores = await Promise.all(trial.map((image, index) => image === cubemap[index]
+        ? scores[index] : compare(reference[index], image)));
+      signal.throwIfAborted();
+      nodes.push(node);
+      cubemap = trial;
+      restored++;
+      onProgress({ nodes, cubemap, node, tested: ++tested, score: worst(scores), kept: true, restored });
+    }
+    return { nodes, cubemap, tested, scores, restored };
+  }
+
   function makeCell(id, depth, min, max, parent) {
     return { id, depth, min, max, parent, status: "pending", reason: "Vistas pendientes", probes: [], children: [] };
   }
@@ -307,7 +365,7 @@
     }
   }
 
-  const api = { faces, viewProjection, corners, boxEdges, center, contains, Octree, Limit };
+  const api = { faces, viewProjection, frustumCorners, selectAtProbe, corners, boxEdges, center, contains, Octree, Limit };
   scope.PointScapeProbeOctree = api;
   if (typeof module !== "undefined") module.exports = api;
 })(globalThis);
